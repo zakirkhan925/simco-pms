@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>SIMCO PMS</title>
+<style>
+  :root{
+    --ink:#10151C; --paper:#F7F8FA; --rule:#DDE2E9;
+    --navy:#15325C; --muted:#5A6572;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%}
+  body{
+    background:var(--paper); color:var(--ink);
+    font:400 16px/1.55 ui-sans-serif,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    font-variant-numeric:tabular-nums;
+    display:grid; place-items:center; padding:24px;
+  }
+  main{max-width:34rem;width:100%}
+  .mark{
+    display:inline-block; font-size:11px; letter-spacing:.14em;
+    color:var(--navy); border:1px solid var(--rule); border-radius:3px;
+    padding:5px 9px; margin-bottom:28px;
+  }
+  h1{font-size:28px; line-height:1.2; font-weight:650; margin:0 0 14px}
+  p{margin:0 0 14px; color:var(--muted); max-width:46ch}
+  .rule{height:1px; background:var(--rule); margin:28px 0}
+  dl{display:grid; grid-template-columns:auto 1fr; gap:8px 20px; margin:0; font-size:14px}
+  dt{color:var(--muted)}
+  dd{margin:0; font-weight:550}
+  footer{margin-top:28px; font-size:12.5px; color:var(--muted)}
+  @media (prefers-color-scheme:dark){
+    :root:not([data-theme="light"]){
+      --ink:#E8ECF2; --paper:#0E1217; --rule:#262D37; --navy:#8FB4E8; --muted:#97A2B0;
+    }
+  }
+</style>
+</head>
+<body>
+<main>
+  <span class="mark">SIMCO CONSTRUCTION</span>
+  <h1>Project Management System</h1>
+  <p>This address is being prepared. The system is live elsewhere in the
+     meantime &mdash; nothing has moved yet, and nobody needs to change how
+     they work today.</p>
+  <div class="rule"></div>
+  <dl>
+    <dt>Database</dt><dd>Migrated &mdash; 59 tables, reconciled</dd>
+    <dt>Application</dt><dd>In progress</dd>
+    <dt>This address</dt><dd>Serving, awaiting the application</dd>
+  </dl>
+  <footer>If you reached this page expecting the PMS, use the existing link
+    for now.</footer>
+</main>
+</body>
+</html>
