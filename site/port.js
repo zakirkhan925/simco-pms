@@ -130,6 +130,21 @@
   // well as procurement; it is not on the new server, so there are none.
   refreshNavCounts = function () { App.navCounts = {}; };
 
+  // Import, Template and Export on the list screens belong to the import /
+  // export module (phase 11). Until it moves, the buttons are shown greyed
+  // with the reason, rather than failing after a click.
+  const originalImportExportBar = importExportBar;
+  importExportBar = function () {
+    const bar = originalImportExportBar.apply(this, arguments);
+    if (!(PHASES[11] && PHASES[11].done)) {
+      bar.querySelectorAll('button').forEach(b => {
+        b.disabled = true;
+        b.title = 'Import and export have not moved to the new system yet';
+      });
+    }
+    return bar;
+  };
+
   // Search and notifications read across every module; neither has moved.
   initGlobalSearch = function () {
     const input = document.getElementById('globalSearch');
