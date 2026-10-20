@@ -23,7 +23,7 @@
     4:  { name: 'Vendors and Procurement', done: true },
     5:  { name: 'Purchase Request Approval Workflow', done: true },
     6:  { name: 'RFQ, Quotations, Purchase Orders', done: true },
-    7:  { name: 'Inventory, GRN, Material Issue', done: false },
+    7:  { name: 'Inventory, GRN, Material Issue', done: true },
     8:  { name: 'RAR / IPC and Client Billing', done: false },
     9:  { name: 'Expenses and Subcontractors', done: false },
     10: { name: 'Reports and Management Dashboard', done: false },
