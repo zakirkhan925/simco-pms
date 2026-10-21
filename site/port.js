@@ -25,11 +25,11 @@
     6:  { name: 'RFQ, Quotations, Purchase Orders', done: true },
     7:  { name: 'Inventory, GRN, Material Issue', done: true },
     8:  { name: 'RAR / IPC and Client Billing', done: true },
-    9:  { name: 'Expenses and Subcontractors', done: false },
+    9:  { name: 'Expenses and Subcontractors', done: true },
     10: { name: 'Reports and Management Dashboard', done: false },
     11: { name: 'Bulk Import / Export, Templates and Documents', done: false },
     12: { name: 'Audit, Notifications, Security, Performance hardening', done: false },
-    13: { name: 'Working cash advances and site imprest', done: false }
+    13: { name: 'Working cash advances and site imprest', done: true }
   };
 
   /**
@@ -55,6 +55,15 @@
     // A project's billing position. Its menu parent is Projects, but it is
     // the billing module's screen, so it opens when RAR / IPC has moved.
     billing: 'rar',
+    expense: 'expenses',
+    subcontractor: 'subcontractors',
+    agreements: 'subcontractors',
+    agreement: 'subcontractors',
+    subbill: 'subcontractors',
+    payables: 'subcontractors',
+    'cash-account': 'cash',
+    'cash-reports': 'cash',
+    'cash-report': 'cash',
     profile: null
   };
 
