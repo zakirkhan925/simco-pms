@@ -35,12 +35,13 @@
   /**
    * Screens inside a moved phase that have not moved themselves:
    *  - database: it inspected and created the Google Sheet's tabs
-   *    (getDatabaseStatus, setupDatabase), which mean nothing here;
-   *  - data: bulk import and export, not ported yet. Its Import / Template /
-   *    Export buttons on the list screens stay greyed too (see below).
+   *    (getDatabaseStatus, setupDatabase), which mean nothing here.
+   * Should bulk import and export ever be shut again, add 'data' here and
+   * set IMPORT_EXPORT_MOVED to false: the list screens' Import / Template /
+   * Export buttons are then greyed too (see below).
    */
-  const NOT_MOVED = ['database', 'data'];
-  const IMPORT_EXPORT_MOVED = false;
+  const NOT_MOVED = ['database'];
+  const IMPORT_EXPORT_MOVED = true;
 
   /**
    * Screens that are not in the menu, and the menu entry they belong to.
