@@ -13771,22 +13771,13 @@ PAGES['notifications'] = pageNotifications;
     profile: null
   };
 
-  const FILES_NOT_STORED = {
-    success: false, code: 'NOT_IMPLEMENTED',
-    message: 'Files are not stored on the new system yet, so nothing was uploaded. ' +
-      'Record the rates without the file, and keep the vendor\'s document on the existing system for now.'
-  };
-
   window.PMS_PORT = {
     phases: PHASES,
     notMoved: NOT_MOVED,
-    // Answered in the page; see call() in site/bridge.js.
+    // Answered in the page; see call() in site/bridge.js. Files are the
+    // server's to accept or refuse: it knows whether Drive is connected.
     local: {
-      getAppMeta: () => ({ success: true, message: 'Meta', data: { phases: PHASES } }),
-      // Refused before the file leaves the browser; the server refuses too.
-      attachQuotationDocument: () => FILES_NOT_STORED,
-      recordQuotation: (token, rfqId, vendorId, d) =>
-        d && d.attachment && d.attachment.Base64 ? FILES_NOT_STORED : undefined
+      getAppMeta: () => ({ success: true, message: 'Meta', data: { phases: PHASES } })
     }
   };
 
