@@ -13726,19 +13726,21 @@ PAGES['notifications'] = pageNotifications;
     7:  { name: 'Inventory, GRN, Material Issue', done: true },
     8:  { name: 'RAR / IPC and Client Billing', done: true },
     9:  { name: 'Expenses and Subcontractors', done: true },
-    10: { name: 'Reports and Management Dashboard', done: false },
-    11: { name: 'Bulk Import / Export, Templates and Documents', done: false },
-    12: { name: 'Audit, Notifications, Security, Performance hardening', done: false },
+    10: { name: 'Reports and Management Dashboard', done: true },
+    11: { name: 'Bulk Import / Export, Templates and Documents', done: true },
+    12: { name: 'Audit, Notifications, Security, Performance hardening', done: true },
     13: { name: 'Working cash advances and site imprest', done: true }
   };
 
   /**
-   * Phase-1 screens whose server functions are not on the new server:
-   * the dashboard (getDashboard, getDecisionQueue — they total billing,
-   * stock and costs, none of which has moved), the audit log (listAuditLog)
-   * and the database page (getDatabaseStatus, setupDatabase).
+   * Screens inside a moved phase that have not moved themselves:
+   *  - database: it inspected and created the Google Sheet's tabs
+   *    (getDatabaseStatus, setupDatabase), which mean nothing here;
+   *  - data: bulk import and export, not ported yet. Its Import / Template /
+   *    Export buttons on the list screens stay greyed too (see below).
    */
-  const NOT_MOVED = ['dashboard', 'audit', 'database'];
+  const NOT_MOVED = ['database', 'data'];
+  const IMPORT_EXPORT_MOVED = false;
 
   /**
    * Screens that are not in the menu, and the menu entry they belong to.
@@ -13764,6 +13766,7 @@ PAGES['notifications'] = pageNotifications;
     'cash-account': 'cash',
     'cash-reports': 'cash',
     'cash-report': 'cash',
+    report: 'reports',
     profile: null
   };
 
@@ -13826,8 +13829,8 @@ PAGES['notifications'] = pageNotifications;
   const originalNavigate = navigate;
   navigate = function (route, arg) {
     if (moved(route)) return originalNavigate(route, arg);
-    // Sign-in and boot land on the dashboard, which has not moved: open the
-    // first screen that has instead of an error.
+    // Sign-in and boot land on the dashboard. Should it ever be shut, open
+    // the first screen that has moved instead of an error.
     if (route === 'dashboard') return originalNavigate(landingRoute());
     const item = navItem(route) || navItem(ROUTE_PARENTS[route]);
     UI.warn('Not moved yet',
@@ -13835,40 +13838,19 @@ PAGES['notifications'] = pageNotifications;
       'It is still worked on in the live system.');
   };
 
-  // Badges come from getNavCounts, which totals stock, billing and costs as
-  // well as procurement; it is not on the new server, so there are none.
-  refreshNavCounts = function () { App.navCounts = {}; };
-
   // Import, Template and Export on the list screens belong to the import /
-  // export module (phase 11). Until it moves, the buttons are shown greyed
-  // with the reason, rather than failing after a click.
+  // export module. Until it moves, the buttons are shown greyed with the
+  // reason, rather than failing after a click.
   const originalImportExportBar = importExportBar;
   importExportBar = function () {
     const bar = originalImportExportBar.apply(this, arguments);
-    if (!(PHASES[11] && PHASES[11].done)) {
+    if (!IMPORT_EXPORT_MOVED) {
       bar.querySelectorAll('button').forEach(b => {
         b.disabled = true;
         b.title = 'Import and export have not moved to the new system yet';
       });
     }
     return bar;
-  };
-
-  // Search and notifications read across every module; neither has moved.
-  initGlobalSearch = function () {
-    const input = document.getElementById('globalSearch');
-    if (!input) return;
-    input.disabled = true;
-    input.placeholder = 'Search has not moved to the new system yet';
-    input.title = input.placeholder;
-  };
-  initNotifications = function () {
-    const btn = document.getElementById('notifBtn');
-    if (!btn) return;
-    btn.disabled = true;
-    btn.style.opacity = '.4';
-    btn.style.cursor = 'not-allowed';
-    btn.title = 'Notifications have not moved to the new system yet';
   };
 })();
 </script>
