@@ -124,6 +124,12 @@
     return 'profile';
   }
 
+  // The old system was switched off after cutover (22 Oct 2026), so a screen
+  // that has not moved can no longer send anyone back to it. The Database
+  // page managed the Google Sheet's tabs and has no meaning here: it leaves
+  // the menu rather than sitting there greyed out.
+  NAV.forEach(g => { g.items = g.items.filter(i => i.id !== 'database'); });
+
   const originalNavigate = navigate;
   navigate = function (route, arg) {
     if (moved(route)) return originalNavigate(route, arg);
@@ -131,9 +137,8 @@
     // the first screen that has moved instead of an error.
     if (route === 'dashboard') return originalNavigate(landingRoute());
     const item = navItem(route) || navItem(ROUTE_PARENTS[route]);
-    UI.warn('Not moved yet',
-      (item ? item.label : 'That screen') + ' has not moved to the new system yet. ' +
-      'It is still worked on in the live system.');
+    UI.warn('Not available',
+      (item ? item.label : 'That screen') + ' is not part of the new system.');
   };
 
   // Import, Template and Export on the list screens belong to the import /
