@@ -7310,6 +7310,17 @@ async function printPurchaseOrder(poId) {
         </tfoot>
       </table>
       ${d.po.Remarks ? `<p><strong>Remarks:</strong> ${UI.esc(d.po.Remarks)}</p>` : ''}
+      ${(d.approvals || []).length ? `
+      <h3 style="margin-top:14px">Approval history and comments</h3>
+      <table>
+        <thead><tr><th>Date</th><th>Step</th><th>By</th><th>Comments</th></tr></thead>
+        <tbody>${d.approvals.map(a => `<tr>
+          <td style="white-space:nowrap">${UI.esc(a.At ? UI.fmt.date(a.At) : '')}</td>
+          <td>${UI.esc(String(a.Action || '').replace(/_/g, ' ').toLowerCase().replace(/^./, c => c.toUpperCase()))}</td>
+          <td>${UI.esc(a.Name || '')}${a.Role ? '<br><small>' + UI.esc(String(a.Role).replace(/_/g, ' ')) + '</small>' : ''}</td>
+          <td style="white-space:pre-wrap">${a.Comments ? UI.esc(a.Comments) : '<span class="muted">—</span>'}</td>
+        </tr>`).join('')}</tbody>
+      </table>` : ''}
       <div class="pr-foot">
         <div>${UI.esc(d.raisedBy ? d.raisedBy.Name : '')}<br><span class="muted">Raised by</span></div>
         <div>${UI.esc(d.approvedBy ? d.approvedBy.Name : '')}<br><span class="muted">Approved by</span></div>
