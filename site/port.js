@@ -77,7 +77,13 @@
     // Answered in the page; see call() in site/bridge.js. Files are the
     // server's to accept or refuse: it knows whether Drive is connected.
     local: {
-      getAppMeta: () => ({ success: true, message: 'Meta', data: { phases: PHASES } })
+      getAppMeta: () => ({ success: true, message: 'Meta', data: { phases: PHASES } }),
+      // The original checked that every Apps Script file arrived whole. The
+      // server here is one bundle with no such files, so there is nothing to
+      // list; asking it cost a refused request on every page load. No data:
+      // the startup band treats that as "nothing missing" and the diagnostics
+      // screen leaves out its "Server files" card, as for an older build.
+      getDeploymentCheck: () => ({ success: true, message: 'Deployment check', data: null })
     }
   };
 
