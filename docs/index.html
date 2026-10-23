@@ -8417,7 +8417,7 @@ async function openGoodsReceipt(grnId) {
   const footer = [{ label: 'Close', onClick: m => m.close() },
                   { label: 'Print', onClick: () => printRecord('GRN', grnId) }];
   // Goods back to the vendor (24 Oct 2026).
-  if (d.canReturn) footer.push({ label: 'Return to vendor', onClick: m => { m.close(); openReturnForm(grnId); } });
+  if (d.canReturn) footer.push({ label: 'Return to vendor', onClick: m => { m.close(); openVendorReturnForm(grnId); } });
   const canReverse = d.canReverse && !(d.reversalBlockers || []).length;
   if (canReverse) {
     footer.push({ label: 'Reverse receipt', class: 'btn-danger', onClick: m => {
@@ -8540,12 +8540,12 @@ async function openReturnPicker() {
   body.appendChild(form);
   UI.modal({ title: 'Return to vendor', size: 'narrow', body, footer: [
     { label: 'Cancel', onClick: m => m.close() },
-    { label: 'Next', class: 'btn-primary', onClick: m => { const d = UI.validate(form, fields); if (!d) return; m.close(); openReturnForm(d.GRNID); } }
+    { label: 'Next', class: 'btn-primary', onClick: m => { const d = UI.validate(form, fields); if (!d) return; m.close(); openVendorReturnForm(d.GRNID); } }
   ] });
 }
 
 /** The lines of one receipt, each with what can still go back. */
-async function openReturnForm(grnId) {
+async function openVendorReturnForm(grnId) {
   let d;
   try { d = (await api('getGRNForReturn', grnId)).data; }
   catch (e) { UI.error('Cannot return from ' + grnId, e.message); return; }
