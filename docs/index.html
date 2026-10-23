@@ -7703,6 +7703,10 @@ async function loadStock() {
         // 2 reversed shows 3, so Opening + In − Out ± Adjusted is the Closing.
         { key: 'Received', label: 'In', align: 'right', render: r =>
           UI.fmt.number(r.Received - (r.Reversed || 0) + r.Returned + r.TransferIn, 3) },
+        // Shown beside the net In so a reversal is visible, not silently netted
+        // (owner's request, 24 Oct 2026).
+        { key: 'Reversed', label: 'Reversed', align: 'right', render: r =>
+          r.Reversed ? `<span class="num-neg">${UI.fmt.number(r.Reversed, 3)}</span>` : '<span class="muted">—</span>' },
         { key: 'Issued', label: 'Out', align: 'right', render: r =>
           UI.fmt.number(r.Issued + r.TransferOut, 3) },
         { key: 'Adjusted', label: 'Adjusted', align: 'right', render: r =>
