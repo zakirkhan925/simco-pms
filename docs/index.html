@@ -1481,6 +1481,8 @@ const NAV = [
     // with nothing on the shelf never appears there.
     { id: 'stock-items',     label: 'Items',           icon: '⊡', phase: 7, perm: 'stock.view' },
     { id: 'goods-receipts',  label: 'Goods Receipts',   icon: '⇩', phase: 7, perm: 'grn.view' },
+    // Material sent back to the vendor (owner's request, 24 Oct 2026).
+    { id: 'goods-returns',   label: 'Goods Returns',    icon: '⇧', phase: 7, perm: 'grn.view' },
     { id: 'material-issues', label: 'Material Issues',  icon: '⇪', phase: 7, perm: 'issue.view' },
     { id: 'transfers',       label: 'Transfers',        icon: '⇆', phase: 7, perm: 'stock.view' }
   ]},
@@ -1915,7 +1917,7 @@ const ROUTE_SOURCE = {
   'purchase-requests': 'Procurement.html', 'rfqs': 'Orders.html',
   'quotations': 'Orders.html', 'purchase-orders': 'Orders.html',
   'vendors': 'JavaScript.html',
-  'stock': 'Stock.html', 'stock-items': 'Stock.html', 'goods-receipts': 'Stock.html',
+  'stock': 'Stock.html', 'stock-items': 'Stock.html', 'goods-receipts': 'Stock.html', 'goods-returns': 'Stock.html',
   'material-issues': 'Stock.html', 'transfers': 'Stock.html',
   'rar': 'Billing.html', 'expenses': 'Costs.html', 'subcontractors': 'Costs.html',
   'cash': 'Treasury.html', 'documents': 'Data.html', 'reports': 'Insights.html',
@@ -4981,7 +4983,7 @@ async function loadVendorLedger(vendorId) {
         { key: 'date', label: 'Date', width: '96px', render: r =>
           r.opening ? '' : UI.fmt.date(r.date) },
         { key: 'type', label: 'Type', width: '92px', render: r =>
-          r.opening ? '' : UI.badge(r.type, r.type === 'Invoice' ? 'amber' : 'green') },
+          r.opening ? '' : UI.badge(r.type, r.type === 'Invoice' ? 'amber' : r.type === 'Debit note' ? 'violet' : 'green') },
         { key: 'ref', label: 'Reference', width: '130px', render: r =>
           r.opening ? '' :
           // The reference is what someone reads out on the phone, so it is
@@ -5004,6 +5006,9 @@ async function loadVendorLedger(vendorId) {
             : r.type === 'Payment'
             ? `<div class="row-actions"><button class="btn btn-sm"
                  data-voucher="${UI.esc(r.ref)}">Voucher</button></div>`
+            : r.type === 'Debit note'
+            ? `<div class="row-actions"><button class="btn btn-sm"
+                 data-debitnote="${UI.esc(r.ref)}">Open</button></div>`
             : `<div class="row-actions"><button class="btn btn-sm"
                  data-invoice="${UI.esc(r.ref)}">Open</button></div>` }
       ],
@@ -5016,6 +5021,9 @@ async function loadVendorLedger(vendorId) {
     });
     host.querySelectorAll('[data-invoice]').forEach(b => {
       b.onclick = () => openSupplierInvoice(b.dataset.invoice, () => loadVendorLedger(vendorId));
+    });
+    host.querySelectorAll('[data-debitnote]').forEach(b => {
+      b.onclick = () => openDebitNote(b.dataset.debitnote, () => loadVendorLedger(vendorId));
     });
   } catch (e) {
     host.innerHTML = UI.errorState(e.message, 'retryLedger');
@@ -5048,6 +5056,47 @@ async function exportVendorLedger(vendorId) {
   } catch (e) { UI.error('Could not export the ledger', e.message); }
 }
 
+/**
+ * Tick boxes for the receipts an invoice is posted against (owner's request,
+ * 24 Oct 2026: one invoice can cover several GRNs). Values are net of goods
+ * returned. Ticking fills the amount in, until someone types their own.
+ * Returns null when the server does not offer the list (an older server).
+ */
+async function grnPicker(vendorId, invoiceId, preselected, amountInput) {
+  let rows;
+  try { rows = (await api('listUninvoicedGRNs', vendorId, { invoiceId: invoiceId || '' })).data.rows; }
+  catch (e) { return null; }
+  const sym = App.settings.currencySymbol || 'Rs';
+  const picked = new Set(preselected || []);
+  let typed = !!(amountInput && amountInput.value && !(preselected || []).length);
+  if (amountInput) amountInput.addEventListener('input', () => { typed = true; });
+  const box = UI.el('div', { class: 'mt-16' });
+  const draw = () => {
+    const total = rows.filter(r => picked.has(r.GRNID)).reduce((s, r) => s + Number(r.Value || 0), 0);
+    box.innerHTML = `<strong style="font-size:12.5px">Against goods receipts</strong>
+      <span class="muted" style="font-size:12.5px"> — tick every receipt this invoice covers</span>
+      ${rows.length ? `<div class="table-wrap mt-8"><table class="data"><thead><tr><th></th><th>Receipt</th><th>Date</th>
+          <th>Order</th><th>Project</th><th class="r">Value</th></tr></thead><tbody>
+        ${rows.map(r => `<tr><td><input type="checkbox" data-g="${UI.esc(r.GRNID)}" ${picked.has(r.GRNID) ? 'checked' : ''}></td>
+          <td class="mono">${UI.esc(r.GRNID)}</td><td>${UI.esc(UI.fmt.date(r.ReceiptDate))}</td>
+          <td class="mono">${UI.esc(r.POID)}</td><td>${UI.esc(r.ProjectName)}</td>
+          <td class="r">${UI.fmt.money(r.Value, sym)}${r.ReturnedValue ? `<br><span class="muted" style="font-size:11.5px">after ${UI.fmt.money(r.ReturnedValue, sym)} returned</span>` : ''}</td></tr>`).join('')}
+        </tbody><tfoot><tr><td colspan="5" class="r">Ticked</td><td class="r"><strong>${UI.fmt.money(total, sym)}</strong></td></tr></tfoot>
+        </table></div>`
+      : '<p class="muted mt-8">No receipts from this vendor are waiting for an invoice.</p>'}`;
+    box.querySelectorAll('[data-g]').forEach(c => c.onchange = () => {
+      c.checked ? picked.add(c.dataset.g) : picked.delete(c.dataset.g);
+      if (amountInput && !typed) {
+        const t = rows.filter(r => picked.has(r.GRNID)).reduce((s, r) => s + Number(r.Value || 0), 0);
+        amountInput.value = t ? Math.round(t * 100) / 100 : '';
+      }
+      draw();
+    });
+  };
+  draw();
+  return { el: box, picked: () => [...picked] };
+}
+
 async function openSupplierInvoiceForm(vendor, onSaved) {
   let pos = [];
   try {
@@ -5069,6 +5118,8 @@ async function openSupplierInvoiceForm(vendor, onSaved) {
   const body = UI.el('div');
   const form = UI.form(fields, {});
   body.appendChild(form);
+  const picker = await grnPicker(vendor.VendorID, '', [], form.querySelector('[name="Amount"]'));
+  if (picker) body.appendChild(picker.el);
   UI.modal({
     title: 'Record invoice — ' + vendor.CompanyName, size: 'wide', body,
     footer: [
@@ -5077,6 +5128,7 @@ async function openSupplierInvoiceForm(vendor, onSaved) {
         const data = UI.validate(form, fields);
         if (!data) return;
         data.VendorID = vendor.VendorID;
+        if (picker) data.GRNIDs = picker.picked();
         m.busy(true);
         try {
           const res = await api('recordSupplierInvoice', data);
@@ -5116,7 +5168,8 @@ async function openSupplierInvoice(invoiceId, onDone) {
       <dt>Invoice date</dt><dd>${UI.esc(UI.fmt.date(inv.InvoiceDate))}</dd>
       <dt>Due</dt><dd>${inv.DueDate ? UI.esc(UI.fmt.date(inv.DueDate)) : '—'}</dd>
       <dt>Project</dt><dd>${UI.esc(d.project ? d.project.ProjectName : '—')}</dd>
-      <dt>Against</dt><dd>${UI.esc(inv.POID || inv.GRNID || '—')}</dd>
+      <dt>Order</dt><dd class="mono">${UI.esc(inv.POID || '—')}</dd>
+      <dt>Goods receipts</dt><dd class="mono">${UI.esc((inv.GRNIDs && inv.GRNIDs.length ? inv.GRNIDs : (inv.GRNID ? [inv.GRNID] : [])).join(', ') || '—')}</dd>
       <dt>Status</dt><dd>${UI.badge(inv.Status, tone[inv.Status] || 'grey')}</dd>
     </dl>
     <table class="data" style="margin-top:4px">
@@ -5195,6 +5248,9 @@ async function openSupplierInvoiceEdit(d, onDone) {
     POID: inv.POID, Amount: inv.Amount, TaxAmount: inv.TaxAmount
   });
   body.appendChild(form);
+  const own = inv.GRNIDs && inv.GRNIDs.length ? inv.GRNIDs : (inv.GRNID ? [inv.GRNID] : []);
+  const picker = await grnPicker(inv.VendorID, inv.SupplierInvoiceID, own, form.querySelector('[name="Amount"]'));
+  if (picker) body.appendChild(picker.el);
 
   UI.modal({
     title: 'Edit invoice ' + inv.SupplierInvoiceID, size: 'wide', body,
@@ -5203,6 +5259,7 @@ async function openSupplierInvoiceEdit(d, onDone) {
       { label: 'Save changes', class: 'btn-primary', onClick: async m => {
         const data = UI.validate(form, fields);
         if (!data) return;
+        if (picker) data.GRNIDs = picker.picked();
         m.busy(true);
         try {
           const res = await api('updateSupplierInvoice', inv.SupplierInvoiceID, data);
@@ -5213,6 +5270,115 @@ async function openSupplierInvoiceEdit(d, onDone) {
       }}
     ]
   });
+}
+
+/**
+ * A debit note against one or more goods returns (owner's request, 24 Oct
+ * 2026) — the mirror of an invoice against receipts. Credits the vendor.
+ */
+async function openDebitNoteForm(vendor, onSaved) {
+  let rows = [];
+  try { rows = (await api('listUndebitedReturns', vendor.VendorID, {})).data.rows; }
+  catch (e) { UI.error('Could not load the returns', e.message); return; }
+  const sym = App.settings.currencySymbol || 'Rs';
+  if (!rows.length) {
+    UI.warn('Nothing to debit', 'This vendor has no goods returns waiting for a debit note.');
+    return;
+  }
+  const fields = [
+    { name: 'NoteDate', label: 'Date', type: 'date', required: true, value: new Date().toISOString().slice(0, 10) },
+    { name: 'Reference', label: 'Vendor credit note / reference' },
+    { name: 'Amount', label: 'Amount', type: 'number', required: true,
+      hint: 'Fills in as the ticked returns’ total; change it if the vendor credits a different figure.' },
+    { name: 'Remarks', label: 'Remarks', type: 'textarea', span: 2 }
+  ];
+  const body = UI.el('div');
+  const form = UI.form(fields, {});
+  body.appendChild(form);
+  const amount = form.querySelector('[name="Amount"]');
+  let typed = false;
+  amount.addEventListener('input', () => { typed = true; });
+  const picked = new Set();
+  const box = UI.el('div', { class: 'mt-16' });
+  const draw = () => {
+    const total = rows.filter(r => picked.has(r.VendorReturnID)).reduce((s, r) => s + Number(r.Value || 0), 0);
+    box.innerHTML = `<strong style="font-size:12.5px">Against goods returns</strong>
+      <div class="table-wrap mt-8"><table class="data"><thead><tr><th></th><th>Return</th><th>Date</th><th>Receipt</th>
+        <th>Project</th><th>Reason</th><th class="r">Value</th></tr></thead><tbody>
+      ${rows.map(r => `<tr><td><input type="checkbox" data-r="${UI.esc(r.VendorReturnID)}" ${picked.has(r.VendorReturnID) ? 'checked' : ''}></td>
+        <td class="mono">${UI.esc(r.VendorReturnID)}</td><td>${UI.esc(UI.fmt.date(r.ReturnDate))}</td>
+        <td class="mono">${UI.esc(r.GRNID)}</td><td>${UI.esc(r.ProjectName)}</td><td>${UI.esc(r.Reason)}</td>
+        <td class="r">${UI.fmt.money(r.Value, sym)}</td></tr>`).join('')}
+      </tbody><tfoot><tr><td colspan="6" class="r">Ticked</td><td class="r"><strong>${UI.fmt.money(total, sym)}</strong></td></tr></tfoot>
+      </table></div>`;
+    box.querySelectorAll('[data-r]').forEach(c => c.onchange = () => {
+      c.checked ? picked.add(c.dataset.r) : picked.delete(c.dataset.r);
+      if (!typed) {
+        const t = rows.filter(r => picked.has(r.VendorReturnID)).reduce((s, r) => s + Number(r.Value || 0), 0);
+        amount.value = t ? Math.round(t * 100) / 100 : '';
+      }
+      draw();
+    });
+  };
+  draw();
+  body.appendChild(box);
+  UI.modal({
+    title: 'Debit note — ' + vendor.CompanyName, size: 'wide', body,
+    footer: [
+      { label: 'Cancel', onClick: m => m.close() },
+      { label: 'Post debit note', class: 'btn-primary', onClick: async m => {
+        const data = UI.validate(form, fields);
+        if (!data) return;
+        if (!picked.size) { UI.error('Choose the returns', 'Tick at least one goods return.'); return; }
+        data.VendorID = vendor.VendorID;
+        data.ReturnIDs = [...picked];
+        m.busy(true);
+        try {
+          const res = await api('recordDebitNote', data);
+          m.close(); UI.success('Posted', res.message);
+          if (onSaved) onSaved();
+        } catch (e) { UI.error('Could not post the debit note', e.message); }
+        finally { m.busy(false); }
+      }}
+    ]
+  });
+}
+
+/** A debit note, opened from the statement: its returns, and cancel. */
+async function openDebitNote(noteId, onDone) {
+  let d;
+  try { d = (await api('getDebitNote', noteId)).data; }
+  catch (e) { UI.error('Could not open the debit note', e.message); return; }
+  const n = d.debitNote;
+  const sym = App.settings.currencySymbol || 'Rs';
+  const body = UI.el('div');
+  body.innerHTML = `
+    ${n.Status === 'Cancelled' ? `<div class="banner banner-warn" style="margin-bottom:12px"><div><strong>CANCELLED.</strong>
+      ${n.CancelReason ? 'Reason: ' + UI.esc(n.CancelReason) : ''}</div></div>` : ''}
+    <dl class="kv">
+      <dt>Vendor</dt><dd>${UI.esc(d.vendor ? d.vendor.CompanyName : n.VendorID)}</dd>
+      <dt>Date</dt><dd>${UI.esc(UI.fmt.date(n.NoteDate))}</dd>
+      <dt>Reference</dt><dd>${UI.esc(n.Reference || '—')}</dd>
+      <dt>Amount</dt><dd><strong>${UI.fmt.money(n.Amount, sym)}</strong></dd>
+      <dt>Status</dt><dd>${UI.badge(n.Status, n.Status === 'Posted' ? 'green' : 'grey')}</dd>
+    </dl>
+    <table class="data mt-8"><thead><tr><th>Return</th><th>Receipt</th><th>Date</th><th>Reason</th><th class="r">Value</th></tr></thead>
+      <tbody>${d.returns.map(r => `<tr><td class="mono">${UI.esc(r.VendorReturnID)}</td><td class="mono">${UI.esc(r.GRNID)}</td>
+        <td>${UI.esc(UI.fmt.date(r.ReturnDate))}</td><td>${UI.esc(r.Reason)}</td><td class="r">${UI.fmt.money(r.Amount, sym)}</td></tr>`).join('')}</tbody></table>`;
+  const footer = [{ label: 'Close', onClick: m => m.close() }];
+  if (d.canCancel) footer.push({ label: 'Cancel debit note', class: 'btn-danger', onClick: m => {
+    m.close();
+    openReasonModal({
+      title: 'Cancel debit note ' + noteId, label: 'Why is it being cancelled?', confirmLabel: 'Cancel debit note', danger: true,
+      intro: `<strong>${UI.fmt.money(n.Amount, sym)}</strong> goes back onto what this vendor is owed, and its returns can be debited again.`,
+      onConfirm: async reason => {
+        const res = await api('cancelDebitNote', noteId, reason);
+        UI.success('Cancelled', res.message);
+        if (onDone) onDone();
+      }
+    });
+  }});
+  UI.modal({ title: 'Debit note ' + noteId, size: 'wide', body, footer });
 }
 
 async function openVendorPaymentForm(vendor, onSaved) {
@@ -5296,6 +5462,7 @@ async function pageVendorProfile(root, vendorId) {
   if (d.canEdit) actions.push(`<button class="btn" id="vendorStatus">Change status</button>`);
   if (d.canEvaluate) actions.push(`<button class="btn" id="evaluateVendor">Record evaluation</button>`);
   if (d.canInvoice) actions.push(`<button class="btn" id="vendorInvoice">+ Invoice</button>`);
+  if (d.canDebitNote) actions.push(`<button class="btn" id="vendorDebitNote">+ Debit note</button>`);
   if (d.canPay) actions.push(`<button class="btn btn-primary" id="vendorPay">+ Payment / advance</button>`);
 
   root.innerHTML =
@@ -5388,6 +5555,8 @@ async function pageVendorProfile(root, vendorId) {
   if (vi) vi.onclick = () => openSupplierInvoiceForm(v, () => loadVendorLedger(vendorId));
   const vp = document.getElementById('vendorPay');
   if (vp) vp.onclick = () => openVendorPaymentForm(v, () => loadVendorLedger(vendorId));
+  const vd = document.getElementById('vendorDebitNote');
+  if (vd) vd.onclick = () => openDebitNoteForm(v, () => loadVendorLedger(vendorId));
   ['ledApply'].forEach(id => {
     const b = document.getElementById(id);
     if (b) b.onclick = () => loadVendorLedger(vendorId);
@@ -7588,7 +7757,8 @@ const issueState = { page: 1, pageSize: 25, search: '', stockRoomId: '', project
                      sortBy: 'IssueDate', sortDir: 'desc' };
 
 const TXN_TONE = { OPENING: 'grey', RECEIPT: 'green', RETURN: 'green', TRANSFER_IN: 'blue',
-                   ISSUE: 'amber', TRANSFER_OUT: 'amber', ADJUSTMENT: 'violet' };
+                   ISSUE: 'amber', TRANSFER_OUT: 'amber', ADJUSTMENT: 'violet',
+                   RECEIPT_REVERSAL: 'red', VENDOR_RETURN: 'red', VENDOR_RETURN_CANCEL: 'grey' };
 const qty = (v, u) => UI.fmt.number(v, 3) + (u ? ' ' + UI.esc(u) : '');
 
 /* ================================================================== STOCK */
@@ -7701,12 +7871,16 @@ async function loadStock() {
         { key: 'Opening', label: 'Opening', align: 'right', render: r => UI.fmt.number(r.Opening, 3) },
         // Net of reversed receipts (owner's request, 23 Oct 2026): 5 received and
         // 2 reversed shows 3, so Opening + In − Out ± Adjusted is the Closing.
+        // In is what was received and kept: less receipts reversed and goods
+        // sent back to the vendor (24 Oct 2026).
         { key: 'Received', label: 'In', align: 'right', render: r =>
-          UI.fmt.number(r.Received - (r.Reversed || 0) + r.Returned + r.TransferIn, 3) },
+          UI.fmt.number(r.Received - (r.Reversed || 0) - (r.ReturnedToVendor || 0) + r.Returned + r.TransferIn, 3) },
         // Shown beside the net In so a reversal is visible, not silently netted
         // (owner's request, 24 Oct 2026).
         { key: 'Reversed', label: 'Reversed', align: 'right', render: r =>
           r.Reversed ? `<span class="num-neg">${UI.fmt.number(r.Reversed, 3)}</span>` : '<span class="muted">—</span>' },
+        { key: 'ReturnedToVendor', label: 'To vendor', align: 'right', render: r =>
+          r.ReturnedToVendor ? `<span class="num-neg">${UI.fmt.number(r.ReturnedToVendor, 3)}</span>` : '<span class="muted">—</span>' },
         { key: 'Issued', label: 'Out', align: 'right', render: r =>
           UI.fmt.number(r.Issued + r.TransferOut, 3) },
         { key: 'Adjusted', label: 'Adjusted', align: 'right', render: r =>
@@ -8158,6 +8332,9 @@ async function loadGoodsReceipts() {
           ? `<s class="muted">${money(r.AcceptedValue)}</s>` : money(r.AcceptedValue) },
         { key: 'Status', label: 'Status', render: r => UI.badge(r.Status || 'Received',
           r.Status === 'Reversed' ? 'red' : 'green') },
+        { key: 'SupplierInvoiceID', label: 'Invoice', render: r => r.SupplierInvoiceID
+          ? `<span class="mono">${UI.esc(r.SupplierInvoiceID)}</span>`
+          : (r.Status === 'Reversed' || r.SupplierInvoiceID === undefined ? '' : '<span class="muted">not yet</span>') },
         { key: 'actions', label: '', sortable: false, render: r =>
           `<div class="row-actions"><button class="btn btn-sm" data-open="${UI.esc(r.GRNID)}">Open</button></div>` }
       ],
@@ -8227,6 +8404,11 @@ async function openGoodsReceipt(grnId) {
                <strong>This receipt can no longer be reversed.</strong><ul style="margin:6px 0 0 18px">
                ${d.reversalBlockers.map(b => `<li>${UI.esc(b)}</li>`).join('')}</ul></div></div>`
           : '')}
+    ${d.invoice !== undefined ? `<p class="mt-16"><strong>Invoice:</strong>
+        ${d.invoice ? `<span class="mono">${UI.esc(d.invoice)}</span>` : '<span class="muted">not invoiced yet</span>'}</p>` : ''}
+    ${(d.returns || []).length ? `<p class="mt-8"><strong>Returned to vendor:</strong>
+        ${d.returns.map(x => `<span class="mono">${UI.esc(x.VendorReturnID)}</span> ${money(x.TotalValue)}` +
+          (x.Status === 'Cancelled' ? ' <span class="muted">(cancelled)</span>' : '')).join(' · ')}</p>` : ''}
     <p class="muted mt-16">Only the accepted quantity became stock —
       ${d.transactions.length} movement(s) were posted to the ledger.</p>`;
 
@@ -8234,6 +8416,8 @@ async function openGoodsReceipt(grnId) {
   // where Close normally sits is one stray click from taking stock out.
   const footer = [{ label: 'Close', onClick: m => m.close() },
                   { label: 'Print', onClick: () => printRecord('GRN', grnId) }];
+  // Goods back to the vendor (24 Oct 2026).
+  if (d.canReturn) footer.push({ label: 'Return to vendor', onClick: m => { m.close(); openReturnForm(grnId); } });
   const canReverse = d.canReverse && !(d.reversalBlockers || []).length;
   if (canReverse) {
     footer.push({ label: 'Reverse receipt', class: 'btn-danger', onClick: m => {
@@ -8254,6 +8438,206 @@ async function openGoodsReceipt(grnId) {
     }});
   }
   UI.modal({ title: 'Goods receipt ' + grnId + (reversed ? ' — REVERSED' : ''), size: 'wide', body, footer: footer });
+}
+
+/* ===================================================== GOODS RETURNS (TO VENDOR) */
+/*
+ * Owner's request, 24 Oct 2026. A return takes stock out and reopens the
+ * quantity on the order; the money side is a debit note, posted from the
+ * vendor's page, as an invoice is to a receipt.
+ */
+const vrState = { page: 1, pageSize: 25, search: '', status: '', sortBy: 'ReturnDate', sortDir: 'desc' };
+
+async function pageGoodsReturns(root) {
+  root.innerHTML =
+    pageHead('Goods Returns', 'Material sent back to the vendor after it was received',
+      can('grn.create') ? `<button class="btn btn-primary" id="newVrBtn">+ Return to vendor</button>` : '') +
+    `<div id="vrSummary" class="stat-grid" style="margin-bottom:16px"></div>
+     <div class="card">
+       <div class="card-head">
+         <div class="filters">
+           <div class="field"><label for="vrSearch">Search</label>
+             <input class="input" id="vrSearch" placeholder="Return, GRN or PO number, vendor, item"
+                    value="${UI.esc(vrState.search)}"></div>
+           <div class="field"><label for="vrStatus">Status</label>
+             <select class="input" id="vrStatus"><option value="">All</option><option>Returned</option><option>Cancelled</option></select></div>
+           <button class="btn" id="vrReset">Reset</button>
+         </div>
+       </div>
+       <div id="vrTable">${UI.loadingState()}</div>
+       <div id="vrPager"></div>
+     </div>`;
+  document.getElementById('vrStatus').value = vrState.status;
+  let debounce;
+  document.getElementById('vrSearch').oninput = e => {
+    clearTimeout(debounce);
+    debounce = setTimeout(() => { vrState.search = e.target.value; vrState.page = 1; loadGoodsReturns(); }, 250);
+  };
+  document.getElementById('vrStatus').onchange = e => { vrState.status = e.target.value; vrState.page = 1; loadGoodsReturns(); };
+  document.getElementById('vrReset').onclick = () => { Object.assign(vrState, { page: 1, search: '', status: '' }); pageGoodsReturns(root); };
+  const nb = document.getElementById('newVrBtn');
+  if (nb) nb.onclick = openReturnPicker;
+  await loadGoodsReturns();
+}
+
+async function loadGoodsReturns() {
+  const mount = document.getElementById('vrTable');
+  if (!mount) return;
+  mount.innerHTML = UI.loadingState();
+  try {
+    const d = (await api('listVendorReturns', vrState)).data;
+    document.getElementById('vrSummary').innerHTML =
+      [['Returns', d.summary.total, 'Visible to you'],
+       ['Value returned', money(d.summary.value), 'Cancelled returns left out'],
+       ['On debit notes', money(d.summary.debited), 'Credited by the vendor'],
+       ['Awaiting debit note', money(Math.round((d.summary.value - d.summary.debited) * 100) / 100), 'Post from the vendor’s page']]
+        .map(t => `<div class="stat"><div class="stat-label">${UI.esc(t[0])}</div>
+          <div class="stat-value">${UI.esc(t[1])}</div><div class="stat-note">${UI.esc(t[2])}</div>
+          <div class="stat-accent"></div></div>`).join('');
+    UI.table(mount, {
+      sortBy: vrState.sortBy, sortDir: vrState.sortDir,
+      onSort: key => { vrState.sortDir = (vrState.sortBy === key && vrState.sortDir === 'asc') ? 'desc' : 'asc'; vrState.sortBy = key; loadGoodsReturns(); },
+      columns: [
+        { key: 'VendorReturnID', label: 'Return', render: r =>
+          `<a href="#" data-open="${UI.esc(r.VendorReturnID)}"><strong class="mono">${UI.esc(r.VendorReturnID)}</strong></a>
+           <br><span class="muted">${UI.fmt.date(r.ReturnDate)}</span>` },
+        { key: 'GRNID', label: 'From receipt', render: r => `<span class="mono">${UI.esc(r.GRNID)}</span><br><span class="muted mono">${UI.esc(r.POID)}</span>` },
+        { key: 'VendorName', label: 'Vendor' },
+        { key: 'Reason', label: 'Reason' },
+        { key: 'TotalValue', label: 'Value', align: 'right', render: r => r.Status === 'Cancelled'
+          ? `<s class="muted">${money(r.TotalValue)}</s>` : money(r.TotalValue) },
+        { key: 'DebitNoteID', label: 'Debit note', render: r => r.DebitNoteID
+          ? `<span class="mono">${UI.esc(r.DebitNoteID)}</span>` : (r.Status === 'Cancelled' ? '' : '<span class="muted">not yet</span>') },
+        { key: 'Status', label: 'Status', render: r => UI.badge(r.Status, r.Status === 'Cancelled' ? 'grey' : 'amber') },
+        { key: 'actions', label: '', sortable: false, render: r =>
+          `<div class="row-actions"><button class="btn btn-sm" data-open="${UI.esc(r.VendorReturnID)}">Open</button></div>` }
+      ],
+      rows: d.rows,
+      empty: UI.emptyState('Nothing returned', 'Open a goods receipt and choose Return to vendor.')
+    });
+    mount.querySelectorAll('[data-open]').forEach(n => { n.onclick = e => { e.preventDefault(); openVendorReturn(n.dataset.open); }; });
+    UI.pager(document.getElementById('vrPager'), {
+      page: d.page, totalPages: d.totalPages, total: d.total, pageSize: d.pageSize,
+      onPage: p => { vrState.page = p; loadGoodsReturns(); }
+    });
+  } catch (e) {
+    mount.innerHTML = UI.errorState(e.message, 'retryVr');
+    const b = document.getElementById('retryVr');
+    if (b) b.onclick = loadGoodsReturns;
+  }
+}
+
+/** Which receipt the goods go back from. */
+async function openReturnPicker() {
+  let rows = [];
+  try { rows = (await api('listGoodsReceipts', { pageSize: 200 })).data.rows.filter(r => r.Status !== 'Reversed'); }
+  catch (e) { UI.error('Could not load the receipts', e.message); return; }
+  if (!rows.length) { UI.warn('Nothing to return', 'There are no received goods receipts.'); return; }
+  const fields = [{ name: 'GRNID', label: 'From goods receipt', type: 'select', required: true,
+    options: rows.map(r => ({ value: r.GRNID, label: r.GRNID + ' — ' + r.VendorName + ' · ' + r.POID + ' · ' + UI.fmt.date(r.ReceiptDate) })) }];
+  const body = UI.el('div');
+  const form = UI.form(fields, {});
+  body.appendChild(form);
+  UI.modal({ title: 'Return to vendor', size: 'narrow', body, footer: [
+    { label: 'Cancel', onClick: m => m.close() },
+    { label: 'Next', class: 'btn-primary', onClick: m => { const d = UI.validate(form, fields); if (!d) return; m.close(); openReturnForm(d.GRNID); } }
+  ] });
+}
+
+/** The lines of one receipt, each with what can still go back. */
+async function openReturnForm(grnId) {
+  let d;
+  try { d = (await api('getGRNForReturn', grnId)).data; }
+  catch (e) { UI.error('Cannot return from ' + grnId, e.message); return; }
+  const body = UI.el('div');
+  body.innerHTML = `
+    <div class="banner banner-info" style="margin-bottom:12px"><div>
+      From <span class="mono">${UI.esc(d.grn.GRNID)}</span> (order <span class="mono">${UI.esc(d.grn.POID)}</span>),
+      ${UI.esc(d.vendor ? d.vendor.CompanyName : '')}, out of ${UI.esc(d.stockRoom ? d.stockRoom.Name : '')}.
+      The quantity is reopened on the order for a replacement.
+      ${d.invoice ? `<br><strong>Already invoiced on ${UI.esc(d.invoice)}</strong> — post a debit note from the vendor’s page afterwards.` : ''}
+    </div></div>
+    <div class="table-wrap"><table class="data"><thead><tr><th>Item</th><th class="num">Accepted</th><th class="num">Already returned</th>
+      <th class="num">On the shelf</th><th class="num">Return now</th><th class="num">Rate</th></tr></thead><tbody>
+      ${d.lines.map(l => `<tr>
+        <td><strong>${UI.esc(l.ItemName)}</strong><br><span class="mono muted">${UI.esc(l.ItemCode)}</span></td>
+        <td class="num">${UI.fmt.number(l.AcceptedQty, 3)} ${UI.esc(l.Unit)}</td>
+        <td class="num">${l.AlreadyReturned ? UI.fmt.number(l.AlreadyReturned, 3) : '—'}</td>
+        <td class="num">${UI.fmt.number(l.OnHand, 3)}</td>
+        <td class="num"><input class="input" type="number" min="0" step="any" style="width:110px;text-align:right"
+          data-line="${UI.esc(l.GRNItemID)}" ${l.Returnable > 0 ? `max="${l.Returnable}" placeholder="up to ${UI.fmt.number(Math.min(l.Returnable, l.OnHand), 3)}"` : 'disabled placeholder="none left"'}></td>
+        <td class="num">${UI.fmt.number(l.Rate)}</td></tr>`).join('')}
+    </tbody></table></div>`;
+  const fields = [
+    { name: 'ReturnDate', label: 'Date', type: 'date', required: true, value: new Date().toISOString().slice(0, 10) },
+    { name: 'Reason', label: 'Why are the goods going back?', type: 'textarea', required: true, span: 2,
+      hint: 'e.g. damaged on delivery, wrong specification, excess' },
+    { name: 'Remarks', label: 'Remarks', type: 'textarea', span: 2 }
+  ];
+  const form = UI.form(fields, {});
+  form.classList.add('mt-16');
+  body.appendChild(form);
+  UI.modal({ title: 'Return to vendor — ' + grnId, size: 'wide', body, footer: [
+    { label: 'Cancel', onClick: m => m.close() },
+    { label: 'Record return', class: 'btn-danger', onClick: async m => {
+      const data = UI.validate(form, fields);
+      if (!data) return;
+      data.items = [...body.querySelectorAll('[data-line]')]
+        .map(i => ({ GRNItemID: i.dataset.line, Quantity: Number(i.value || 0) })).filter(i => i.Quantity > 0);
+      if (!data.items.length) { UI.error('Nothing to return', 'Enter the quantity going back on at least one line.'); return; }
+      m.busy(true);
+      try {
+        const res = await api('createVendorReturn', grnId, data);
+        m.close(); UI.success('Returned', res.message);
+        if (App.route === 'goods-returns') loadGoodsReturns(); else navigate('goods-returns');
+      } catch (e) { m.busy(false); UI.error('Could not record the return', e.message); }
+    } }
+  ] });
+}
+
+async function openVendorReturn(returnId) {
+  let d;
+  try { d = (await api('getVendorReturn', returnId)).data; }
+  catch (e) { UI.error('Could not load the return', e.message); return; }
+  const r = d.vendorReturn;
+  const cancelled = r.Status === 'Cancelled';
+  const body = UI.el('div');
+  body.innerHTML =
+    (cancelled ? `<div class="banner banner-warn" style="margin-bottom:14px"><div>
+        <strong>CANCELLED — the stock went back into the store.</strong>
+        ${d.cancelledBy ? 'By ' + UI.esc(d.cancelledBy.Name) : ''}${r.CancelledAt ? ' on ' + UI.fmt.date(r.CancelledAt) : ''}.
+        ${r.CancelReason ? '<br>Reason: ' + UI.esc(r.CancelReason) : ''}</div></div>` : '') +
+    `<div class="grid-2">
+      <div class="box"><h4>Back to</h4>
+        <div>${UI.esc(d.vendor ? d.vendor.CompanyName : '')}</div>
+        <div>From receipt <span class="mono">${UI.esc(r.GRNID)}</span> · order <span class="mono">${UI.esc(r.POID)}</span></div>
+        <div class="muted">${UI.fmt.date(r.ReturnDate)} · by ${UI.esc(d.returnedBy ? d.returnedBy.Name : '')}</div></div>
+      <div class="box"><h4>Out of</h4>
+        <div>${UI.esc(d.stockRoom ? d.stockRoom.Name : '')}</div>
+        <div class="muted">${UI.esc(d.project ? d.project.ProjectName : '')}</div>
+        <div>Debit note: ${r.DebitNoteID ? `<span class="mono">${UI.esc(r.DebitNoteID)}</span>` : '<span class="muted">not yet</span>'}</div></div>
+    </div>
+    <p class="mt-16"><strong>Reason:</strong> ${UI.esc(r.Reason)}${r.Remarks ? '<br><span class="muted">' + UI.esc(r.Remarks) + '</span>' : ''}</p>
+    <div class="table-wrap mt-8"><table class="data"><thead><tr><th>Item</th><th class="num">Quantity</th><th class="num">Rate</th><th class="num">Value</th></tr></thead>
+      <tbody>${d.items.map(i => `<tr><td><strong>${UI.esc(i.ItemName)}</strong><br><span class="mono muted">${UI.esc(i.ItemCode)}</span></td>
+        <td class="num">${UI.fmt.number(i.Quantity, 3)} ${UI.esc(i.Unit)}</td><td class="num">${UI.fmt.number(i.Rate)}</td>
+        <td class="num">${UI.fmt.number(i.Amount)}</td></tr>`).join('')}</tbody>
+      <tfoot><tr><td colspan="3" class="r">Total</td><td class="num"><strong>${UI.fmt.number(r.TotalValue)}</strong></td></tr></tfoot></table></div>
+    ${d.cancelBlockedBy ? `<div class="banner banner-info mt-16"><div>${UI.esc(d.cancelBlockedBy)}</div></div>` : ''}`;
+  const footer = [{ label: 'Close', onClick: m => m.close() }];
+  if (d.canCancel) footer.push({ label: 'Cancel return', class: 'btn-danger', onClick: m => {
+    m.close();
+    openReasonModal({
+      title: 'Cancel ' + returnId, label: 'Why is it being cancelled?', confirmLabel: 'Cancel return', danger: true,
+      intro: 'The goods go back into the store and the order quantity is closed again. The return stays on record, marked cancelled.',
+      onConfirm: async reason => {
+        const res = await api('cancelVendorReturn', returnId, reason);
+        UI.success('Cancelled', res.message);
+        if (App.route === 'goods-returns') loadGoodsReturns();
+      }
+    });
+  } });
+  UI.modal({ title: 'Goods return ' + returnId + (cancelled ? ' — CANCELLED' : ''), size: 'wide', body, footer });
 }
 
 async function openReceivePicker() {
@@ -9090,6 +9474,7 @@ PAGES['stock-items'] = pageStockItems;
 ROUTE_PARENTS['stock-items'] = 'stock-items';
 PAGES['stock'] = pageStock;
 PAGES['goods-receipts'] = pageGoodsReceipts;
+PAGES['goods-returns'] = pageGoodsReturns;
 PAGES['material-issues'] = pageMaterialIssues;
 PAGES['transfers'] = pageTransfers;
 </script>
