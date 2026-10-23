@@ -8128,8 +8128,11 @@ async function loadGoodsReceipts() {
     const d = (await api('listGoodsReceipts', grnState)).data;
     document.getElementById('grnSummary').innerHTML =
       [['Receipts', d.summary.total, 'Visible to you'],
-       ['Accepted value', money(d.summary.value), 'Material taken into stock'],
+       ['Accepted value', money(d.summary.value), d.summary.reversed === undefined
+          ? 'Material taken into stock' : 'Material taken into stock, reversals left out'],
        ['With rejections', d.summary.withRejections, 'Something was sent back']]
+        // Reversed receipts, counted apart (24 Oct 2026).
+        .concat(d.summary.reversed ? [['Reversed', d.summary.reversed, money(d.summary.reversedValue) + ' taken back out']] : [])
         .map(t => `<div class="stat"><div class="stat-label">${UI.esc(t[0])}</div>
           <div class="stat-value">${UI.esc(t[1])}</div><div class="stat-note">${UI.esc(t[2])}</div>
           <div class="stat-accent"></div></div>`).join('');
@@ -8150,7 +8153,11 @@ async function loadGoodsReceipts() {
         { key: 'LineCount', label: 'Lines', align: 'right' },
         { key: 'RejectedQty', label: 'Rejected', align: 'right', render: r =>
           r.RejectedQty ? UI.badge(UI.fmt.number(r.RejectedQty, 3), 'red') : '<span class="muted">—</span>' },
-        { key: 'AcceptedValue', label: 'Accepted', align: 'right', render: r => money(r.AcceptedValue) },
+        // A reversed receipt says so, and its value is struck through (24 Oct 2026).
+        { key: 'AcceptedValue', label: 'Accepted', align: 'right', render: r => r.Status === 'Reversed'
+          ? `<s class="muted">${money(r.AcceptedValue)}</s>` : money(r.AcceptedValue) },
+        { key: 'Status', label: 'Status', render: r => UI.badge(r.Status || 'Received',
+          r.Status === 'Reversed' ? 'red' : 'green') },
         { key: 'actions', label: '', sortable: false, render: r =>
           `<div class="row-actions"><button class="btn btn-sm" data-open="${UI.esc(r.GRNID)}">Open</button></div>` }
       ],
@@ -8178,7 +8185,15 @@ async function openGoodsReceipt(grnId) {
   catch (e) { UI.error('Could not load the receipt', e.message); return; }
 
   const body = UI.el('div');
+  const reversed = d.grn.Status === 'Reversed';
   body.innerHTML =
+    // Said first, not after the lines (24 Oct 2026: it was easy to miss).
+    (reversed ? `<div class="banner banner-warn" style="margin-bottom:14px"><div>
+        <strong>REVERSED — this receipt no longer counts.</strong>
+        ${d.reversedBy ? 'By ' + UI.esc(d.reversedBy.Name) : ''}
+        ${d.grn.ReversedAt ? ' on ' + UI.fmt.date(d.grn.ReversedAt) : ''}.
+        ${d.grn.ReversalReason ? '<br>Reason: ' + UI.esc(d.grn.ReversalReason) : ''}
+        <br>The stock was taken back out and the order quantities reopened.</div></div>` : '') +
     `<div class="grid-2">
       <div class="box"><h4>Delivery</h4>
         <div>Order <span class="mono">${UI.esc(d.grn.POID)}</span></div>
@@ -8205,13 +8220,8 @@ async function openGoodsReceipt(grnId) {
         <td class="num">${UI.fmt.number(i.Rate)}</td>
         <td class="num">${UI.fmt.number(i.Amount)}</td></tr>`).join('')}</tbody>
     </table></div>
-    ${d.grn.Status === 'Reversed'
-      ? `<div class="banner banner-warn mt-16"><div>
-           <strong>This receipt was reversed.</strong>
-           ${d.reversedBy ? 'By ' + UI.esc(d.reversedBy.Name) : ''}
-           ${d.grn.ReversedAt ? ' on ' + UI.fmt.date(d.grn.ReversedAt) : ''}.
-           ${d.grn.ReversalReason ? '<br>Reason: ' + UI.esc(d.grn.ReversalReason) : ''}
-           <br>The stock was taken back out and the order quantities reopened.</div></div>`
+    ${reversed
+      ? ''
       : (d.reversalBlockers && d.reversalBlockers.length
           ? `<div class="banner banner-info mt-16"><div>
                <strong>This receipt can no longer be reversed.</strong><ul style="margin:6px 0 0 18px">
@@ -8243,7 +8253,7 @@ async function openGoodsReceipt(grnId) {
       });
     }});
   }
-  UI.modal({ title: 'Goods receipt ' + grnId, size: 'wide', body, footer: footer });
+  UI.modal({ title: 'Goods receipt ' + grnId + (reversed ? ' — REVERSED' : ''), size: 'wide', body, footer: footer });
 }
 
 async function openReceivePicker() {
