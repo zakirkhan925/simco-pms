@@ -228,6 +228,15 @@ button{font-family:inherit;font-size:inherit}
   padding-bottom:14px;margin-bottom:22px;border-bottom:2px solid var(--ink)}
 .page-title{font-size:25px;font-weight:700;letter-spacing:-.015em}
 .page-sub{font-size:13px;color:var(--muted);margin-top:4px}
+/* Breadcrumbs above a detail screen's title (23 Oct 2026). */
+.crumbs{display:flex;align-items:center;gap:12px;flex-wrap:wrap;font-size:12.5px;color:var(--muted);margin:-8px 0 10px}
+.crumbs a{color:var(--accent)}
+.crumbs a:hover{text-decoration:underline}
+.crumb-back{font-weight:600;padding:3px 10px 3px 8px;border:1px solid var(--accent-soft);border-radius:999px;
+  background:var(--accent-soft)}
+.crumb-trail{display:flex;align-items:center;flex-wrap:wrap;gap:6px;min-width:0}
+.crumb-sep{color:var(--muted);opacity:.7}
+.crumb-here{color:var(--text);font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:46ch}
 
 @media (max-width:1000px){
   .topbar-inner{flex-wrap:wrap;padding:10px 16px;gap:10px;min-height:0}
@@ -1987,9 +1996,78 @@ function reportMissingScreen(route) {
            'screen and whether its code loaded.');
 }
 
+/* ---------------------------------------------------------- BREADCRUMBS */
+
+/**
+ * The screens passed through on the way to this one (owner's request,
+ * 23 Oct 2026): each detail screen shows "‹ Back" and the trail above its
+ * title. A menu screen starts a fresh trail; reopening the screen already
+ * shown (a page refreshing itself after a save) adds nothing.
+ */
+App.trail = [];
+App.here = null;
+App.crumbJump = false;
+
+function isMenuRoute(route) {
+  return NAV.some(g => g.items.some(i => i.id === route));
+}
+
+function trackTrail(route, arg) {
+  const key = JSON.stringify([route, arg === undefined ? null : arg]);
+  if (App.crumbJump) {
+    App.crumbJump = false;
+  } else if (isMenuRoute(route)) {
+    App.trail = [];
+  } else if (App.here && App.here.key !== key) {
+    App.trail.push(App.here);
+    if (App.trail.length > 6) App.trail.shift();
+  }
+  if (!App.here || App.here.key !== key) App.here = { route, arg, key, title: '' };
+}
+
+function crumbsHtml() {
+  if (isMenuRoute(App.route)) return '';
+  let trail = App.trail;
+  // Opened with nothing behind it (a notification, a fresh sign-in): offer
+  // the list the screen belongs to.
+  if (!trail.length) {
+    const parent = ROUTE_PARENTS[App.route];
+    const item = parent && NAV.reduce((f, g) => f || g.items.find(i => i.id === parent), null);
+    if (!item) return '';
+    trail = [{ route: parent, arg: undefined, title: item.label, synthetic: true }];
+  }
+  const links = trail.map((t, i) =>
+    `<a href="#" data-crumb="${i}"${t.synthetic ? ' data-crumb-route="' + UI.esc(t.route) + '"' : ''}>` +
+    `${UI.esc(t.title || t.route)}</a>`).join('<span class="crumb-sep">›</span>');
+  return `<nav class="crumbs" aria-label="Breadcrumb">
+      <a href="#" data-crumb-back class="crumb-back">‹ Back</a>
+      <span class="crumb-trail">${links}<span class="crumb-sep">›</span>
+        <span class="crumb-here">${UI.esc(App.here ? App.here.title : '')}</span></span>
+    </nav>`;
+}
+
+document.addEventListener('click', e => {
+  const a = e.target.closest && e.target.closest('[data-crumb], [data-crumb-back]');
+  if (!a || !document.getElementById('content').contains(a)) return;
+  e.preventDefault();
+  if (a.hasAttribute('data-crumb-route')) { navigate(a.getAttribute('data-crumb-route')); return; }
+  const i = a.hasAttribute('data-crumb-back') ? App.trail.length - 1 : Number(a.getAttribute('data-crumb'));
+  if (i < 0) {
+    const parent = ROUTE_PARENTS[App.route];
+    navigate(parent && PAGES[parent] ? parent : 'dashboard');
+    return;
+  }
+  const target = App.trail[i];
+  App.trail = App.trail.slice(0, i);
+  App.here = null;
+  App.crumbJump = true;
+  navigate(target.route, target.arg);
+});
+
 function navigate(route, arg) {
   const page = PAGES[route];
   if (!page) { reportMissingScreen(route); return; }
+  trackTrail(route, arg);
   App.route = route;
   App.routeArg = arg;
   const mod = moduleOf(ROUTE_PARENTS[route] || route);
@@ -2009,7 +2087,8 @@ function navigate(route, arg) {
 
 function pageHead(title, sub, actionsHtml = '') {
   document.getElementById('headerTitle').textContent = title;
-  return `<div class="page-head"><div><div class="page-title">${UI.esc(title)}</div>
+  if (App.here) App.here.title = String(title);
+  return crumbsHtml() + `<div class="page-head"><div><div class="page-title">${UI.esc(title)}</div>
     ${sub ? `<div class="page-sub">${UI.esc(sub)}</div>` : ''}</div>
     <div class="flex gap-8">${actionsHtml}</div></div>`;
 }
@@ -9747,7 +9826,8 @@ const agrState = { page: 1, pageSize: 25, search: '', status: '', projectId: '',
 const SUB_TONE = { Active: 'green', Inactive: 'grey', Blacklisted: 'red', Unknown: 'amber' };
 const EXPENSE_TONE = { 'Draft': 'grey', 'Submitted': 'blue', 'Approved': 'green',
                        'Rejected': 'red', 'Returned': 'amber', 'Paid': 'green' };
-const AGREEMENT_TONE = { 'Draft': 'grey', 'Active': 'green', 'Suspended': 'amber',
+const AGREEMENT_TONE = { 'Draft': 'grey', 'Pending Approval': 'blue', 'Returned': 'amber',
+                         'Active': 'green', 'Suspended': 'amber',
                          'Completed': 'blue', 'Terminated': 'red' };
 const SUBBILL_TONE = { 'Draft': 'grey', 'Submitted': 'blue', 'Returned': 'amber',
                        'Approved': 'green', 'Partially Paid': 'violet', 'Paid': 'green',
@@ -10999,6 +11079,13 @@ async function pageAgreement(root, agreementId) {
   if (d.canChangeStatus && d.allowedTransitions.length) {
     actions.push(`<button class="btn" id="agrStatusBtn">Change status</button>`);
   }
+  // Submitted and decided like a subcontractor bill (owner's decision, 23 Oct 2026).
+  if (d.canSubmit) actions.push(`<button class="btn btn-primary" id="agrSubmit">Submit for approval</button>`);
+  if (d.canDecide) {
+    actions.push(`<button class="btn" id="agrReturn">Return</button>`);
+    actions.push(`<button class="btn btn-danger" id="agrReject">Reject</button>`);
+    actions.push(`<button class="btn btn-primary" id="agrApprove">Approve</button>`);
+  }
   if (d.canBill) actions.push(`<button class="btn btn-primary" id="agrBillBtn">+ New bill</button>`);
 
   root.innerHTML =
@@ -11055,7 +11142,9 @@ async function pageAgreement(root, agreementId) {
     rows: d.bills,
     empty: UI.emptyState('No bills yet', a.Status === 'Active'
       ? 'Raise the first bill when work has been measured.'
-      : 'The agreement must be active before a bill can be raised.')
+      : a.Status === 'Pending Approval'
+        ? 'Bills can be raised once the agreement is approved.'
+        : 'Submit the agreement for approval; bills can be raised once it is active.')
   });
   root.querySelectorAll('[data-bill]').forEach(el => {
     el.onclick = e => { e.preventDefault(); navigate('subbill', el.dataset.bill); };
@@ -11068,6 +11157,40 @@ async function pageAgreement(root, agreementId) {
     () => navigate('agreement', agreementId)));
   on('agrBillBtn', () => subBillForm(agreementId, d, () => navigate('agreement', agreementId)));
   on('agrStatusBtn', () => agreementStatusDialog(agreementId, d.allowedTransitions));
+  on('agrSubmit', async () => {
+    try { UI.success((await api('submitAgreement', agreementId)).message); navigate('agreement', agreementId); }
+    catch (e) { UI.error('Could not submit', e.message); }
+  });
+  on('agrApprove', () => decideAgreementDialog(agreementId, 'APPROVE'));
+  on('agrReturn', () => decideAgreementDialog(agreementId, 'RETURN'));
+  on('agrReject', () => decideAgreementDialog(agreementId, 'REJECT'));
+}
+
+function decideAgreementDialog(agreementId, action) {
+  const verb = { APPROVE: 'Approve', RETURN: 'Return for correction', REJECT: 'Reject' }[action];
+  const needsReason = action !== 'APPROVE';
+  const fields = [{ name: 'Comments', label: needsReason ? 'Reason (required)' : 'Comments',
+                    type: 'textarea', required: needsReason, span: 2,
+                    hint: action === 'REJECT' ? 'A rejected agreement is terminated.' : '' }];
+  const body = UI.el('div');
+  const form = UI.form(fields, {});
+  body.appendChild(form);
+  UI.modal({
+    title: verb + ' agreement', size: 'narrow', body,
+    footer: [
+      { label: 'Cancel', onClick: m => m.close() },
+      { label: verb, class: action === 'REJECT' ? 'btn-danger' : 'btn-primary', onClick: async m => {
+          const data = UI.validate(form, fields);
+          if (!data) return;
+          m.busy(true);
+          try {
+            UI.success((await api('decideAgreement', agreementId, action, data.Comments || '')).message);
+            m.close();
+            navigate('agreement', agreementId);
+          } catch (e) { m.busy(false); UI.error('Could not record the decision', e.message); }
+        } }
+    ]
+  });
 }
 
 
