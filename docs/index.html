@@ -228,6 +228,11 @@ button{font-family:inherit;font-size:inherit}
   padding-bottom:14px;margin-bottom:22px;border-bottom:2px solid var(--ink)}
 .page-title{font-size:25px;font-weight:700;letter-spacing:-.015em}
 .page-sub{font-size:13px;color:var(--muted);margin-top:4px}
+/* Several rows chosen at once — BOQ lines, 23 Oct 2026. */
+.bulk-bar{display:flex;align-items:center;gap:14px;flex-wrap:wrap;padding:10px 16px;
+  border-top:1px solid var(--line, rgba(0,0,0,.08));font-size:13px}
+.bulk-bar.hidden{display:none}
+.bulk-bar .check{display:flex;align-items:center;gap:6px;cursor:pointer}
 /* Breadcrumbs above a detail screen's title (23 Oct 2026). */
 .crumbs{display:flex;align-items:center;gap:12px;flex-wrap:wrap;font-size:12.5px;color:var(--muted);margin:-8px 0 10px}
 .crumbs a{color:var(--accent)}
@@ -2068,6 +2073,7 @@ function navigate(route, arg) {
   const page = PAGES[route];
   if (!page) { reportMissingScreen(route); return; }
   trackTrail(route, arg);
+  App.crumbsDrawn = false;
   App.route = route;
   App.routeArg = arg;
   const mod = moduleOf(ROUTE_PARENTS[route] || route);
@@ -2087,8 +2093,16 @@ function navigate(route, arg) {
 
 function pageHead(title, sub, actionsHtml = '') {
   document.getElementById('headerTitle').textContent = title;
-  if (App.here) App.here.title = String(title);
-  return crumbsHtml() + `<div class="page-head"><div><div class="page-title">${UI.esc(title)}</div>
+  // Only the screen's own head carries the breadcrumbs and names the trail
+  // entry. A project tab reuses a whole list screen (Purchase Orders, say),
+  // whose head comes second and must not add a second trail or rename this one.
+  let crumbs = '';
+  if (!App.crumbsDrawn) {
+    App.crumbsDrawn = true;
+    if (App.here) App.here.title = String(title);
+    crumbs = crumbsHtml();
+  }
+  return crumbs + `<div class="page-head"><div><div class="page-title">${UI.esc(title)}</div>
     ${sub ? `<div class="page-sub">${UI.esc(sub)}</div>` : ''}</div>
     <div class="flex gap-8">${actionsHtml}</div></div>`;
 }
@@ -4040,6 +4054,7 @@ async function renderProjectBOQ(host, d, sym) {
         <div class="flex gap-8" id="boqActions"></div>
       </div>
       <div id="boqTotals"></div>
+      <div id="boqBulk" class="bulk-bar hidden"></div>
       <div id="boqTable">${UI.loadingState()}</div>
       <div id="boqPager"></div>
     </div>`;
@@ -4102,6 +4117,43 @@ async function loadBOQ(projectId, sym) {
             <div class="stat-accent"></div></div>`).join('')}
       </div>`;
 
+    // Several lines deleted at once (owner's request, 23 Oct 2026). The
+    // choice is per page and is cleared whenever the list reloads.
+    const canBulk = !!d.canDelete;   // sent only by a server that has deleteBOQItems
+    const picked = new Set();
+    const bulk = document.getElementById('boqBulk');
+    const drawBulk = () => {
+      if (!bulk) return;
+      bulk.classList.toggle('hidden', !canBulk || !d.rows.length);
+      bulk.innerHTML = `<label class="check"><input type="checkbox" id="boqPickAll"
+          ${picked.size && picked.size === d.rows.length ? 'checked' : ''}> Select all on this page</label>
+        <span class="muted">${picked.size ? picked.size + ' selected' : ''}</span>
+        <button class="btn btn-sm btn-danger" id="boqDelPicked" ${picked.size ? '' : 'disabled'}>
+          Delete selected${picked.size ? ' (' + picked.size + ')' : ''}</button>`;
+      const all = document.getElementById('boqPickAll');
+      if (all) all.onchange = e => {
+        picked.clear();
+        if (e.target.checked) d.rows.forEach(r => picked.add(r.BOQID));
+        mount.querySelectorAll('[data-pick]').forEach(c => { c.checked = e.target.checked; });
+        drawBulk();
+      };
+      const del = document.getElementById('boqDelPicked');
+      if (del) del.onclick = () => UI.confirm({
+        title: 'Delete ' + picked.size + ' BOQ line(s)',
+        message: d.rows.filter(r => picked.has(r.BOQID)).slice(0, 12)
+          .map(r => r.ItemCode + ' — ' + r.Description).join('\n') +
+          (picked.size > 12 ? '\n… and ' + (picked.size - 12) + ' more' : '') +
+          '\n\nIf any of them has been billed, nothing is deleted.',
+        confirmLabel: 'Delete ' + picked.size, danger: true,
+        onConfirm: async m => {
+          try {
+            const res = await api('deleteBOQItems', [...picked]);
+            m.close(); UI.success(res.message); loadBOQ(projectId, sym);
+          } catch (e) { UI.error('Nothing was deleted', e.message); }
+        }
+      });
+    };
+
     UI.table(mount, {
       sortBy: boqState.sortBy, sortDir: boqState.sortDir,
       onSort: key => {
@@ -4109,6 +4161,8 @@ async function loadBOQ(projectId, sym) {
         boqState.sortBy = key; loadBOQ(projectId, sym);
       },
       columns: [
+        ...(canBulk ? [{ key: 'pick', label: '', sortable: false, width: '34px', render: r =>
+          `<input type="checkbox" data-pick="${UI.esc(r.BOQID)}" aria-label="Select ${UI.esc(r.ItemCode)}">` }] : []),
         { key: 'ItemCode', label: 'Code', render: r =>
           `<span class="mono"><strong>${UI.esc(r.ItemCode)}</strong></span>` +
           (r.IsRevised ? ' ' + UI.badge('Revised', 'violet') : '') },
@@ -4133,6 +4187,10 @@ async function loadBOQ(projectId, sym) {
       empty: UI.emptyState('No BOQ items', 'Add items one by one, or import a CSV using the template.')
     });
 
+    mount.querySelectorAll('[data-pick]').forEach(c => {
+      c.onchange = () => { c.checked ? picked.add(c.dataset.pick) : picked.delete(c.dataset.pick); drawBulk(); };
+    });
+    drawBulk();
     mount.querySelectorAll('[data-edit]').forEach(b => {
       const row = d.rows.find(r => r.BOQID === b.dataset.edit);
       b.onclick = () => openBOQForm(projectId, row, sym);
@@ -5163,12 +5221,24 @@ async function openVendorPaymentForm(vendor, onSaved) {
     const led = (await api('getVendorLedger', vendor.VendorID, {})).data;
     open = led.entries.filter(e => e.type === 'Invoice' && e.status !== 'Paid');
   } catch (e) { /* a payment on account is still allowed */ }
+  // An advance is a payment with no invoice, optionally against one of the
+  // vendor's orders (owner's request, 23 Oct 2026: the form never said so).
+  let orders = [];
+  try {
+    orders = (await api('listPurchaseOrders', { vendorId: vendor.VendorID, pageSize: 200 })).data.rows
+      .filter(o => ['Cancelled', 'Draft'].indexOf(o.Status) === -1);
+  } catch (e) { /* the advance can still be recorded without an order */ }
 
   const sym = App.settings.currencySymbol || 'Rs';
   const fields = [
     { name: 'SupplierInvoiceID', label: 'Against invoice', type: 'select',
-      options: [''].concat(open.map(e => e.ref)),
-      hint: open.length ? 'Leave blank to pay on account.' : 'No unpaid invoices — this will be on account.' },
+      options: [{ value: '', label: '— none: this is an advance —' }].concat(open.map(e => ({ value: e.ref, label: e.ref }))),
+      hint: open.length ? 'Leave blank to record an advance (on account). It counts against what the vendor is owed.'
+                        : 'No unpaid invoices — this will be recorded as an advance (on account).' },
+    { name: 'POID', label: 'Advance against order', type: 'select',
+      options: [{ value: '', label: '—' }].concat(orders.map(o => ({ value: o.POID,
+        label: o.POID + ' — ' + (o.ProjectName || o.ProjectID) + ' · ' + UI.fmt.money(o.Total, sym) }))),
+      hint: 'For an advance only. Its project is taken from the order.' },
     { name: 'PaymentDate', label: 'Payment date', type: 'date', required: true,
       value: new Date().toISOString().slice(0, 10) },
     { name: 'Amount', label: 'Amount', type: 'number', required: true },
@@ -5189,13 +5259,18 @@ async function openVendorPaymentForm(vendor, onSaved) {
   const form = UI.form(fields, {});
   body.appendChild(form);
   UI.modal({
-    title: 'Record payment — ' + vendor.CompanyName, size: 'wide', body,
+    title: 'Payment or advance — ' + vendor.CompanyName, size: 'wide', body,
     footer: [
       { label: 'Cancel', onClick: m => m.close() },
       { label: 'Record payment', class: 'btn-primary', onClick: async m => {
         const data = UI.validate(form, fields);
         if (!data) return;
         data.VendorID = vendor.VendorID;
+        if (data.SupplierInvoiceID) data.POID = '';   // the invoice names its own order
+        else if (data.POID) {
+          const o = orders.find(x => x.POID === data.POID);
+          if (o) data.ProjectID = o.ProjectID;
+        }
         m.busy(true);
         try {
           const res = await api('recordVendorPayment', data);
@@ -5221,7 +5296,7 @@ async function pageVendorProfile(root, vendorId) {
   if (d.canEdit) actions.push(`<button class="btn" id="vendorStatus">Change status</button>`);
   if (d.canEvaluate) actions.push(`<button class="btn" id="evaluateVendor">Record evaluation</button>`);
   if (d.canInvoice) actions.push(`<button class="btn" id="vendorInvoice">+ Invoice</button>`);
-  if (d.canPay) actions.push(`<button class="btn btn-primary" id="vendorPay">+ Payment</button>`);
+  if (d.canPay) actions.push(`<button class="btn btn-primary" id="vendorPay">+ Payment / advance</button>`);
 
   root.innerHTML =
     pageHead(v.CompanyName, `${v.Category} · ${v.VendorID}${v.City ? ' · ' + v.City : ''}`, actions.join('')) +
@@ -5515,6 +5590,8 @@ async function pagePurchaseRequests(root, arg) {
   // Opened from inside a project, the list is scoped to it; opened from the
   // sidebar, it is not. The filter lives in state either way.
   prState.projectId = (arg && arg.projectId) ? arg.projectId : '';
+  // Inside a project, cancelled requests are left out (owner's request, 23 Oct 2026).
+  prState.hideCancelled = !!prState.projectId;
   if (arg && arg.projectId) prState.page = 1;
   const sym = App.settings.currencySymbol || 'Rs';
   root.innerHTML =
@@ -6857,6 +6934,8 @@ function openPoFromRfqForm(d) {
 
 async function pagePurchaseOrders(root, arg) {
   poState.projectId = (arg && arg.projectId) ? arg.projectId : '';
+  // Inside a project, cancelled orders are left out (owner's request, 23 Oct 2026).
+  poState.hideCancelled = !!poState.projectId;
   if (arg && arg.projectId) poState.page = 1;
   root.innerHTML =
     pageHead('Purchase Orders', 'What the company has committed to buy',
@@ -7620,8 +7699,10 @@ async function loadStock() {
         { key: 'StockRoomName', label: 'Store' },
         { key: 'Category', label: 'Category' },
         { key: 'Opening', label: 'Opening', align: 'right', render: r => UI.fmt.number(r.Opening, 3) },
+        // Net of reversed receipts (owner's request, 23 Oct 2026): 5 received and
+        // 2 reversed shows 3, so Opening + In − Out ± Adjusted is the Closing.
         { key: 'Received', label: 'In', align: 'right', render: r =>
-          UI.fmt.number(r.Received + r.Returned + r.TransferIn, 3) },
+          UI.fmt.number(r.Received - (r.Reversed || 0) + r.Returned + r.TransferIn, 3) },
         { key: 'Issued', label: 'Out', align: 'right', render: r =>
           UI.fmt.number(r.Issued + r.TransferOut, 3) },
         { key: 'Adjusted', label: 'Adjusted', align: 'right', render: r =>
@@ -10258,6 +10339,8 @@ async function loadSubcontractors() {
   const mount = document.getElementById('subTable');
   if (!mount) return;
   const d = (await api('listSubcontractors', Object.assign({}, subState))).data;
+  // A server that stores CNIC sends the key on every row (null when blank).
+  if ((d.rows || []).some(r => 'CNIC' in r)) App.serverHasCnic = true;
 
   subFilterMeta = d.categoryGroups || [];
   fillSubFilters();
@@ -10386,8 +10469,11 @@ async function subcontractorForm(existing, onSaved) {
   const cats = (await api('listSubcategories', {})).data;
 
   const fields = [
-    { name: 'CompanyName', label: 'Company name', required: true, span: 2 },
+    { name: 'CompanyName', label: 'Name (company, or the person for an individual)', required: true, span: 2 },
     { name: 'ContactPerson', label: 'Contact person' },
+    // Shown only once the server stores it, so nothing typed here is dropped.
+    ...((existing ? 'CNIC' in existing : App.serverHasCnic)
+      ? [{ name: 'CNIC', label: 'CNIC', placeholder: '12345-1234567-1' }] : []),
     { name: 'Phone', label: 'Phone' },
     { name: 'Email', label: 'Email', type: 'email' },
     { name: 'NTN', label: 'NTN' },
@@ -10565,6 +10651,7 @@ async function pageSubcontractor(root, subId) {
   root.innerHTML =
     pageHead(s.CompanyName, ((s.CategoryList || [s.Trade]).join(' · ')) + ' · ' + s.SubcontractorID,
       (d.canEdit ? `<button class="btn" id="subEdit">Edit</button>` : '') +
+      (d.canPayAdvance ? ` <button class="btn" id="subAdvBtn">Record advance</button>` : '') +
       (d.canCreateAgreement ? ` <button class="btn btn-primary" id="newAgrBtn">+ New agreement</button>` : '')) +
     `<div class="stat-grid" style="margin-bottom:16px">
        ${statTile('Contracted', cash(d.totals.contracted), d.agreements.length + ' agreement(s)')}
@@ -10584,6 +10671,7 @@ async function pageSubcontractor(root, subId) {
            <dt>Contact</dt><dd>${UI.esc(s.ContactPerson || '—')}</dd>
            <dt>Phone</dt><dd>${UI.esc(s.Phone || '—')}</dd>
            <dt>Email</dt><dd>${UI.esc(s.Email || '—')}</dd>
+           <dt>CNIC</dt><dd class="mono">${UI.esc(s.CNIC || '—')}</dd>
            <dt>NTN</dt><dd>${UI.esc(s.NTN || '—')}</dd>
            <dt>STRN</dt><dd>${UI.esc(s.STRN || '—')}</dd>
            <dt>Bank</dt><dd>${UI.esc(s.BankName || '—')}</dd>
@@ -10651,6 +10739,8 @@ async function pageSubcontractor(root, subId) {
   if (eb) eb.onclick = () => subcontractorForm(s, () => navigate('subcontractor', subId));
   const nb = document.getElementById('newAgrBtn');
   if (nb) nb.onclick = () => agreementForm(null, subId, () => navigate('subcontractor', subId));
+  const ab = document.getElementById('subAdvBtn');
+  if (ab) ab.onclick = () => subAdvanceDialog(s, d.agreements, () => navigate('subcontractor', subId));
 }
 
 /**
@@ -11087,6 +11177,7 @@ async function pageAgreement(root, agreementId) {
     actions.push(`<button class="btn btn-primary" id="agrApprove">Approve</button>`);
   }
   if (d.canBill) actions.push(`<button class="btn btn-primary" id="agrBillBtn">+ New bill</button>`);
+  if (d.canReleaseRetention) actions.push(`<button class="btn" id="agrRetention">Release retention</button>`);
 
   root.innerHTML =
     pageHead(agreementId, (d.subcontractor ? d.subcontractor.CompanyName : '') +
@@ -11098,7 +11189,8 @@ async function pageAgreement(root, agreementId) {
        ${statTile('Remaining', cash(p.remaining), 'left of the agreement')}
        ${statTile('Paid', cash(p.paid), '')}
        ${statTile('Outstanding', cash(p.outstanding), 'net still to pay')}
-       ${statTile('Retention held', cash(p.retentionHeld), 'released at completion')}
+       ${statTile('Retention held', cash(p.retentionHeld),
+          p.retentionReleased ? cash(p.retentionReleased) + ' released' : 'released at completion')}
        ${statTile('Advance outstanding', cash(p.advanceOutstanding),
           p.advancePaidCash > 0
             ? cash(p.advancePaidCash) + ' paid in cash' +
@@ -11123,9 +11215,48 @@ async function pageAgreement(root, agreementId) {
          <div class="card-head"><h3>History</h3></div>
          <div class="card-body" id="agrHistory"></div>
        </div>
-     </div>`;
+     </div>
+     ${(d.retentionReleases || []).length ? `<div class="card" style="margin-top:16px">
+       <div class="card-head"><h3>Retention released</h3></div>
+       <div id="agrReleases"></div>
+     </div>` : ''}`;
 
   renderAgreementLines(document.getElementById('agrLineTable'), d);
+  const relHost = document.getElementById('agrReleases');
+  if (relHost) {
+    UI.table(relHost, {
+      columns: [
+        { key: 'PaymentDate', label: 'Date', width: '110px', render: r =>
+          r.IsReversed ? `<s class="muted">${UI.fmt.date(r.PaymentDate)}</s>` : UI.fmt.date(r.PaymentDate) },
+        { key: 'Amount', label: 'Amount', align: 'right', render: r =>
+          r.IsReversed ? `<s class="muted">${cash(r.Amount)}</s>` : cash(r.Amount) },
+        { key: 'Method', label: 'Method' },
+        { key: 'Reference', label: 'Reference', render: r => r.Reference ? `<span class="mono">${UI.esc(r.Reference)}</span>` : '—' },
+        { key: 'Remarks', label: 'Reason', render: r => UI.esc(r.Remarks || '') +
+          (r.IsReversed ? '<br>' + UI.badge('Reversed', 'red') +
+            (r.ReversalReason ? ` <span class="muted">${UI.esc(r.ReversalReason)}</span>` : '') : '') },
+        { key: 'actions', label: '', align: 'right', render: r => r.CanReverse
+          ? `<div class="row-actions"><button class="btn btn-sm btn-danger" data-unrelease="${UI.esc(r.SubPaymentID)}">Reverse</button></div>` : '' }
+      ],
+      rows: d.retentionReleases
+    });
+    relHost.querySelectorAll('[data-unrelease]').forEach(b => {
+      b.onclick = () => {
+        const rel = d.retentionReleases.find(x => String(x.SubPaymentID) === b.dataset.unrelease);
+        openReasonModal({
+          title: 'Reverse release ' + rel.SubPaymentID,
+          label: 'Why is this being reversed?',
+          confirmLabel: 'Reverse release', danger: true,
+          intro: `<strong>${cash(rel.Amount)}</strong> released on ${UI.fmt.date(rel.PaymentDate)} is held again on this agreement.`,
+          onConfirm: async reason => {
+            const res = await api('reverseSubcontractorPayment', rel.SubPaymentID, reason);
+            UI.success('Reversed', res.message);
+            navigate('agreement', agreementId);
+          }
+        });
+      };
+    });
+  }
 
   UI.table(document.getElementById('agrBills'), {
     columns: [
@@ -11161,9 +11292,88 @@ async function pageAgreement(root, agreementId) {
     try { UI.success((await api('submitAgreement', agreementId)).message); navigate('agreement', agreementId); }
     catch (e) { UI.error('Could not submit', e.message); }
   });
+  on('agrRetention', () => releaseRetentionDialog(agreementId, p.retentionHeld));
   on('agrApprove', () => decideAgreementDialog(agreementId, 'APPROVE'));
   on('agrReturn', () => decideAgreementDialog(agreementId, 'RETURN'));
   on('agrReject', () => decideAgreementDialog(agreementId, 'REJECT'));
+}
+
+/**
+ * An advance paid by head office — bank, cheque or cash — rather than from a
+ * site float (owner's request, 23 Oct 2026). Against an agreement it is
+ * recovered from that agreement's bills; without one it waits to be tagged.
+ */
+async function subAdvanceDialog(s, agreements, onDone) {
+  const live = (agreements || []).filter(a => ['Completed', 'Terminated'].indexOf(a.Status) === -1);
+  let projects = [];
+  try {
+    projects = (await api('listProjects', { pageSize: 200 })).data.rows.filter(p => String(p.Status) !== 'Closed');
+  } catch (e) { /* the agreement carries its project */ }
+  const fields = [
+    { name: 'AgreementID', label: 'Against agreement', type: 'select',
+      options: [{ value: '', label: '— none yet —' }].concat(live.map(a => ({ value: a.AgreementID,
+        label: a.AgreementID + ' — ' + (a.ProjectName || a.ProjectID) + ' · ' + (a.Scope || '') }))),
+      hint: 'Recovered from this agreement’s bills. Leave blank if there is no agreement yet.' },
+    { name: 'ProjectID', label: 'Project (when no agreement)', type: 'select',
+      options: [{ value: '', label: '—' }].concat(projects.map(p => ({ value: p.ProjectID, label: p.ProjectID + ' — ' + p.ProjectName }))) },
+    { name: 'Amount', label: 'Amount', type: 'number', required: true },
+    { name: 'PaymentDate', label: 'Date', type: 'date' },
+    { name: 'Method', label: 'Paid by', type: 'select', options: ['Bank transfer', 'Cheque', 'Cash'] },
+    { name: 'Reference', label: 'Cheque / transfer reference' },
+    { name: 'Remarks', label: 'Remarks', type: 'textarea', span: 2 }
+  ];
+  const body = UI.el('div');
+  const form = UI.form(fields, { PaymentDate: new Date().toISOString().slice(0, 10), Method: 'Bank transfer',
+                                 AgreementID: live.length === 1 ? live[0].AgreementID : '' });
+  body.appendChild(form);
+  UI.modal({
+    title: 'Advance to ' + s.CompanyName, body,
+    footer: [
+      { label: 'Cancel', onClick: m => m.close() },
+      { label: 'Record advance', class: 'btn-primary', onClick: async m => {
+          const data = UI.validate(form, fields);
+          if (!data) return;
+          m.busy(true);
+          try {
+            UI.success((await api('recordSubcontractorAdvance', s.SubcontractorID, data)).message);
+            m.close();
+            if (onDone) onDone();
+          } catch (e) { m.busy(false); UI.error('Could not record the advance', e.message); }
+        } }
+    ]
+  });
+}
+
+/** Hand back retention held on this agreement's bills (owner's decision, 23 Oct 2026). */
+function releaseRetentionDialog(agreementId, held) {
+  const fields = [
+    { name: 'Amount', label: 'Amount to release', type: 'number', required: true,
+      hint: 'Up to ' + cash(held) + ' is held' },
+    { name: 'PaymentDate', label: 'Date', type: 'date' },
+    { name: 'Method', label: 'Paid by', type: 'select', options: ['Bank transfer', 'Cheque', 'Cash'] },
+    { name: 'Reference', label: 'Cheque / transfer reference' },
+    { name: 'Remarks', label: 'Reason (required)', type: 'textarea', required: true, span: 2,
+      hint: 'e.g. defects liability period over' }
+  ];
+  const body = UI.el('div');
+  const form = UI.form(fields, { Amount: held, PaymentDate: new Date().toISOString().slice(0, 10), Method: 'Bank transfer' });
+  body.appendChild(form);
+  UI.modal({
+    title: 'Release retention', size: 'narrow', body,
+    footer: [
+      { label: 'Cancel', onClick: m => m.close() },
+      { label: 'Release', class: 'btn-primary', onClick: async m => {
+          const data = UI.validate(form, fields);
+          if (!data) return;
+          m.busy(true);
+          try {
+            UI.success((await api('releaseSubcontractorRetention', agreementId, data)).message);
+            m.close();
+            navigate('agreement', agreementId);
+          } catch (e) { m.busy(false); UI.error('Could not release retention', e.message); }
+        } }
+    ]
+  });
 }
 
 function decideAgreementDialog(agreementId, action) {
@@ -11809,6 +12019,45 @@ async function cashAccountForm() {
   });
 }
 
+/**
+ * Edit a float after it is opened (owner's decision, 23 Oct 2026). Its project
+ * is fixed; a change of holder is a hand-over, refused by the server while a
+ * period report is open.
+ */
+async function cashAccountEditDialog(a) {
+  const users = (await api('listUsers', { pageSize: 200 })).data.rows
+    .filter(u => String(u.Status) === 'Active' || u.UserID === a.CustodianUserID);
+  const fields = [
+    { name: 'Name', label: 'Name', required: true, span: 2 },
+    { name: 'CustodianUserID', label: 'Held by', type: 'select', required: true,
+      options: users.map(u => ({ value: u.UserID, label: u.Name + ' (' + u.Role + ')' })),
+      hint: 'Changing this hands the float, and the cash in it, to that person' },
+    { name: 'FloatLimit', label: 'Ceiling', type: 'number', hint: 'The most the float may hold. 0 for no ceiling' },
+    { name: 'Remarks', label: 'Remarks', type: 'textarea', span: 2 }
+  ];
+  const body = UI.el('div');
+  const form = UI.form(fields, { Name: a.Name, CustodianUserID: a.CustodianUserID,
+                                 FloatLimit: a.FloatLimit, Remarks: a.Remarks || '' });
+  body.appendChild(form);
+  UI.modal({
+    title: 'Edit float ' + a.CashAccountID, body,
+    footer: [
+      { label: 'Cancel', onClick: m => m.close() },
+      { label: 'Save', class: 'btn-primary', onClick: async m => {
+          const data = UI.validate(form, fields);
+          if (!data) return;
+          m.busy(true);
+          try {
+            const res = await api('updateCashAccount', a.CashAccountID, data);
+            UI.success(res.message);
+            m.close();
+            navigate('cash-account', a.CashAccountID);
+          } catch (e) { m.busy(false); UI.error('Could not save the float', e.message); }
+        } }
+    ]
+  });
+}
+
 /* ------------------------------------------------- ONE FLOAT AND ITS LEDGER */
 
 async function pageCashAccount(root, accountId) {
@@ -11823,6 +12072,8 @@ async function pageCashAccount(root, accountId) {
     actions.push(`<button class="btn" id="cashReportBtn">Draw up report</button>`);
   }
   if (d.canSpend) actions.push(`<button class="btn btn-primary" id="cashSpendBtn">+ Record payment</button>`);
+  // Owner's decision, 23 Oct 2026: a float's name, ceiling, remarks and holder can be changed.
+  if (d.canEditFloat) actions.splice(1, 0, `<button class="btn" id="cashEditBtn">Edit float</button>`);
 
   root.innerHTML =
     pageHead(accountId, UI.esc(a.CustodianName) + ' · ' + UI.esc(a.ProjectName), actions.join(' ')) +
@@ -11916,6 +12167,7 @@ async function pageCashAccount(root, accountId) {
 
   const on = (id, fn) => { const b = document.getElementById(id); if (b) b.onclick = fn; };
   on('cashBack', () => navigate('cash'));
+  on('cashEditBtn', () => cashAccountEditDialog(a));
   on('cashIssueBtn', () => cashIssueDialog(accountId, p));
   on('cashSpendBtn', () => cashSpendDialog(accountId, d));
   on('cashTransferBtn', () => cashTransferDialog(accountId, d.balance));
