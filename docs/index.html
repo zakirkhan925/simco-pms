@@ -5194,6 +5194,8 @@ async function openSupplierInvoice(invoiceId, onDone) {
     ${d.blockedBy ? `<div class="banner banner-info mt-16"><div>${UI.esc(d.blockedBy)}</div></div>` : ''}`;
 
   const footer = [{ label: 'Close', onClick: m => m.close() }];
+  // Printing needs the server that knows SUPINV; it says so with canPrint.
+  if (d.canPrint) footer.push({ label: 'Print', onClick: () => printRecord('SUPINV', invoiceId) });
   if (d.canCancel) {
     footer.push({ label: 'Cancel invoice', class: 'btn-danger', onClick: m => {
       m.close();
@@ -14130,7 +14132,8 @@ const PRINT_TITLES = { PO: 'Purchase order', PR: 'Purchase request', GRN: 'Goods
                        SUBBILL: 'Subcontractor bill', RFQ: 'Request for quotation',
                        VENDORPAY: 'Vendor payment voucher', CASHREPORT: 'Working cash report',
                        VENDORSTMT: 'Vendor statement of account',
-                       SUBSTMT: 'Subcontractor statement of account' };
+                       SUBSTMT: 'Subcontractor statement of account',
+                       SUPINV: 'Supplier invoice' };
 
 async function printRecord(kind, recordId, options) {
   let payload;
@@ -14176,6 +14179,56 @@ const PRINT_BODIES = {
       </table>
       ${vendors.length ? `<p class="muted" style="margin-top:14px">Issued to:
         ${vendors.map(v => UI.esc(v.CompanyName)).join(', ')}.</p>` : ''}`;
+  },
+
+  /**
+   * A supplier invoice as booked (owner's request, 24 Oct 2026): the vendor's
+   * invoice details, the goods received behind it from each GRN, and what has
+   * been paid — for the file and for checking against the vendor's own bill.
+   */
+  SUPINV(p) {
+    const d = p.data, inv = d.invoice;
+    const sym = (p.company && p.company.currency) || 'Rs';
+    const n = x => UI.fmt.number(x);
+    const money = x => sym + ' ' + n(x);
+    const lines = d.lines || [];
+    const goods = lines.reduce((s, l) => s + Number(l.Value || 0), 0);
+    const live = (d.payments || []).filter(x => !x.IsReversed);
+    return `
+      ${inv.Status === 'Cancelled' ? `<p style="border:1px solid #8C1D18;color:#8C1D18;padding:8px 10px;
+         font-weight:600">This invoice is cancelled.</p>` : ''}
+      <dl class="kv">
+        <dt>Vendor</dt><dd>${UI.esc(d.vendor ? d.vendor.CompanyName : inv.VendorID)}</dd>
+        ${d.vendor && d.vendor.NTN ? `<dt>NTN</dt><dd>${UI.esc(d.vendor.NTN)}</dd>` : ''}
+        <dt>Vendor's invoice no.</dt><dd>${UI.esc(inv.InvoiceNumber)}</dd>
+        <dt>Invoice date</dt><dd>${UI.esc(UI.fmt.date(inv.InvoiceDate))}</dd>
+        <dt>Due</dt><dd>${inv.DueDate ? UI.esc(UI.fmt.date(inv.DueDate)) : '—'}</dd>
+        ${d.project ? `<dt>Project</dt><dd>${UI.esc(d.project.ProjectName)}</dd>` : ''}
+        ${inv.POID ? `<dt>Order</dt><dd>${UI.esc(inv.POID)}</dd>` : ''}
+        <dt>Status</dt><dd>${UI.esc(inv.Status)}</dd>
+      </dl>
+      ${lines.length ? `<table>
+        <thead><tr><th style="width:90px">GRN</th><th style="width:84px">Received</th><th>Item</th>
+          <th class="r" style="width:80px">Qty</th><th class="r" style="width:80px">Rate</th>
+          <th class="r" style="width:100px">Value</th></tr></thead>
+        <tbody>${lines.map(l => `<tr>
+          <td>${UI.esc(l.GRNID)}</td><td>${UI.esc(UI.fmt.date(l.ReceiptDate))}</td>
+          <td>${UI.esc(l.ItemCode)}${l.ItemName ? ' — ' + UI.esc(l.ItemName) : ''}</td>
+          <td class="r">${n(l.Quantity)} ${UI.esc(l.Unit || '')}</td>
+          <td class="r">${n(l.Rate)}</td><td class="r">${n(l.Value)}</td></tr>`).join('')}
+        </tbody>
+        <tfoot><tr class="total"><td colspan="5">Goods received</td><td class="r">${n(goods)}</td></tr></tfoot>
+      </table>` : ''}
+      <table class="summary" style="margin-top:14px">
+        <tr><td>Amount before tax</td><td class="r">${money(inv.Amount)}</td></tr>
+        <tr><td>Tax</td><td class="r">${money(inv.TaxAmount)}</td></tr>
+        <tr class="total"><td>Net payable</td><td class="r">${money(inv.NetAmount)}</td></tr>
+        <tr><td>Paid</td><td class="r">${money(inv.PaidAmount)}</td></tr>
+        <tr class="total"><td>Outstanding</td><td class="r">${money(inv.Outstanding)}</td></tr>
+      </table>
+      ${live.length ? `<p style="margin-top:10px">Paid by: ${live.map(x => UI.esc(x.VendorPaymentID) + ' (' +
+        UI.esc(UI.fmt.date(x.PaymentDate)) + ', ' + n(x.Amount) + ')').join('; ')}</p>` : ''}
+      <p style="margin-top:14px"><strong>Net payable in words:</strong> ${UI.esc(amountInWords(inv.NetAmount))}</p>`;
   },
 
   VENDORPAY(p) {
@@ -14385,6 +14438,7 @@ function buildPrintHtml(p) {
       signatures: p.kind === 'VENDORPAY' ? ['Prepared by', 'Approved by', 'Received by']
         : p.kind === 'CASHREPORT' ? ['Custodian', 'Checked by', 'Approved by']
         : p.kind === 'VENDORSTMT' || p.kind === 'SUBSTMT' ? ['Prepared by', 'Checked by']
+        : p.kind === 'SUPINV' ? ['Prepared by', 'Checked by', 'Approved by']
         : ['Prepared by', 'Approved by'],
       body: bespoke(p)
     });
@@ -14411,7 +14465,7 @@ function buildPrintHtml(p) {
 const PRINT_REF_FIELD = {
   PO: 'POID', PR: 'PRID', GRN: 'GRNID', ISSUE: 'IssueID', RAR: 'RARID',
   SUBBILL: 'SubBillID', RFQ: 'RFQID', VENDORPAY: 'VendorPaymentID',
-  CASHREPORT: 'CashReportID'
+  CASHREPORT: 'CashReportID', SUPINV: 'SupplierInvoiceID'
 };
 
 /** Turns whichever record shape the server returned into a header block plus lines. */
@@ -14420,7 +14474,9 @@ function flattenForPrint(p) {
   // Each payload wraps its record under a different key. The three newest —
   // an RFQ, a payment voucher, a cash report — were not listed here, so their
   // printed copies came out with no reference number on them at all.
-  const record = d.po || d.pr || d.grn || d.issue || d.rar || d.bill ||
+  // A supplier invoice's payload is the one whose record is d.invoice; other
+  // payloads (a voucher, a receipt) carry an invoice beside their own record.
+  const record = (p.kind === 'SUPINV' && d.invoice) || d.po || d.pr || d.grn || d.issue || d.rar || d.bill ||
                  d.purchaseOrder || d.rfq || d.payment || d.report || d;
   const header = [];
   Object.keys(record).forEach(k => {
