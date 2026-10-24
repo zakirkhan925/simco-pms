@@ -5005,7 +5005,10 @@ async function loadVendorLedger(vendorId) {
           r.opening ? ''
             : r.type === 'Payment'
             ? `<div class="row-actions"><button class="btn btn-sm"
-                 data-voucher="${UI.esc(r.ref)}">Voucher</button></div>`
+                 data-voucher="${UI.esc(r.ref)}">Voucher</button>` +
+              // A payment or advance keyed wrong is reversed, not deleted (24 Oct 2026).
+              (can('vendor.pay') ? ` <button class="btn btn-sm btn-danger" data-revpay="${UI.esc(r.ref)}">Reverse</button>` : '') +
+              `</div>`
             : r.type === 'Debit note'
             ? `<div class="row-actions"><button class="btn btn-sm"
                  data-debitnote="${UI.esc(r.ref)}">Open</button></div>`
@@ -5018,6 +5021,25 @@ async function loadVendorLedger(vendorId) {
     });
     host.querySelectorAll('[data-voucher]').forEach(b => {
       b.onclick = () => printRecord('VENDORPAY', b.dataset.voucher);
+    });
+    host.querySelectorAll('[data-revpay]').forEach(b => {
+      b.onclick = () => {
+        const e = d.entries.find(x => x.ref === b.dataset.revpay);
+        openReasonModal({
+          title: 'Reverse payment ' + e.ref,
+          label: 'Why is this being reversed?',
+          confirmLabel: 'Reverse payment', danger: true,
+          intro: `<strong>${UI.esc(UI.fmt.money(e.credit, sym))}</strong> paid on ${UI.esc(UI.fmt.date(e.date))}
+            goes back onto what is owed to the vendor` + (e.related && /^SINV/.test(e.related)
+              ? `, and invoice ${UI.esc(e.related)} is open again for it.` : '.') +
+            ' The payment stays on the record marked Reversed — nothing is deleted.',
+          onConfirm: async reason => {
+            const res = await api('reverseVendorPayment', e.ref, reason);
+            UI.success('Reversed', res.message);
+            loadVendorLedger(vendorId);
+          }
+        });
+      };
     });
     host.querySelectorAll('[data-invoice]').forEach(b => {
       b.onclick = () => openSupplierInvoice(b.dataset.invoice, () => loadVendorLedger(vendorId));
@@ -11155,6 +11177,8 @@ async function pageSubcontractor(root, subId) {
   });
 
   const advHost = document.getElementById('subAdvances');
+  // The server says so from 24 Oct 2026; before that, the reader's own permissions.
+  const canReverseAdvance = d.canReversePayment === undefined ? can('subcontract.pay.reverse') : d.canReversePayment;
   if (advHost) {
     UI.table(advHost, {
       columns: [
@@ -11162,19 +11186,48 @@ async function pageSubcontractor(root, subId) {
         { key: 'SubPaymentID', label: 'Advance', width: '110px' },
         { key: 'ProjectName', label: 'Project' },
         { key: 'Amount', label: 'Amount', align: 'right', render: r => cash(r.Amount) },
+        { key: 'Method', label: 'Paid by', render: r => UI.esc(r.Method || '—') +
+            (r.Reference ? `<br><span class="muted mono">${UI.esc(r.Reference)}</span>` : '') },
         { key: 'Remarks', label: 'For' },
         { key: 'AgreementID', label: 'Recovered through', render: r => r.AgreementID
             ? `<a href="#" class="link" data-agr="${r.AgreementID}">` +
               UI.esc(r.AgreementNumber || r.AgreementID) + '</a>'
             : (d.canEdit
                 ? `<button class="linklike" data-tag="${r.SubPaymentID}">Attach to agreement</button>`
-                : '<span class="muted">Not on an agreement</span>') }
+                : '<span class="muted">Not on an agreement</span>') },
+        // Voucher and reversal for an advance (owner's request, 24 Oct 2026).
+        { key: 'actions', label: '', align: 'right', render: r => `<div class="row-actions">` +
+            (d.canPrintPayment ? `<button class="btn btn-sm" data-voucher="${UI.esc(r.SubPaymentID)}">Voucher</button>` : '') +
+            (canReverseAdvance ? ` <button class="btn btn-sm btn-danger" data-revadv="${UI.esc(r.SubPaymentID)}">Reverse</button>` : '') +
+            `</div>` }
       ],
       rows: d.advances,
       empty: UI.emptyState('No advances', 'No cash has been advanced to this subcontractor.')
     });
     advHost.querySelectorAll('[data-tag]').forEach(b => {
       b.onclick = () => tagAdvanceDialog(b.dataset.tag, d, () => navigate('subcontractor', subId));
+    });
+    advHost.querySelectorAll('[data-voucher]').forEach(b => {
+      b.onclick = () => printRecord('SUBPAY', b.dataset.voucher);
+    });
+    advHost.querySelectorAll('[data-revadv]').forEach(b => {
+      b.onclick = () => {
+        const adv = d.advances.find(x => String(x.SubPaymentID) === b.dataset.revadv);
+        openReasonModal({
+          title: 'Reverse advance ' + adv.SubPaymentID,
+          label: 'Why is this being reversed?',
+          confirmLabel: 'Reverse advance', danger: true,
+          intro: `<strong>${cash(adv.Amount)}</strong> advanced on ${UI.fmt.date(adv.PaymentDate)} comes off what
+            this subcontractor has received. It stays on the record marked Reversed — nothing is deleted.` +
+            (adv.CashAccountID ? ' It came out of a working cash float, so the cash returns to that float as a movement dated today.' : '') +
+            ' It cannot be reversed once bills have recovered it.',
+          onConfirm: async reason => {
+            const res = await api('reverseSubcontractorPayment', adv.SubPaymentID, reason);
+            UI.success('Reversed', res.message);
+            navigate('subcontractor', subId);
+          }
+        });
+      };
     });
     advHost.querySelectorAll('[data-agr]').forEach(a => {
       a.onclick = e => { e.preventDefault(); navigate('agreement', a.dataset.agr); };
@@ -12265,12 +12318,16 @@ async function pageSubBill(root, billId) {
         ? UI.badge('Reversed', 'red') +
           (r.ReversalReason ? `<br><span class="muted">${UI.esc(r.ReversalReason)}</span>` : '')
         : '' },
-      { key: 'actions', label: '', align: 'right', render: r => r.CanReverse
-        ? `<div class="row-actions"><button class="btn btn-sm btn-danger"
-             data-reverse="${UI.esc(r.SubPaymentID)}">Reverse</button></div>` : '' }
+      { key: 'actions', label: '', align: 'right', render: r => `<div class="row-actions">` +
+        (d.canPrintPayment ? `<button class="btn btn-sm" data-voucher="${UI.esc(r.SubPaymentID)}">Voucher</button>` : '') +
+        (r.CanReverse ? ` <button class="btn btn-sm btn-danger"
+             data-reverse="${UI.esc(r.SubPaymentID)}">Reverse</button>` : '') + `</div>` }
     ],
     rows: d.payments,
     empty: UI.emptyState('Nothing paid yet', 'Payments appear here once recorded.')
+  });
+  payHost.querySelectorAll('[data-voucher]').forEach(b => {
+    b.onclick = () => printRecord('SUBPAY', b.dataset.voucher);
   });
   payHost.querySelectorAll('[data-reverse]').forEach(b => {
     b.onclick = () => {
@@ -12361,9 +12418,12 @@ function subPaymentDialog(billId, outstanding) {
       hint: cash(outstanding) + ' is outstanding' },
     { name: 'PaymentDate', label: 'Payment date', type: 'date', required: true,
       value: new Date().toISOString().slice(0, 10) },
-    { name: 'PaymentMethod', label: 'Method', type: 'select',
-      options: ['Bank transfer', 'Cheque', 'Cash'] },
-    { name: 'ReferenceNo', label: 'Reference' },
+    // Method and Reference: the names the server reads. The original screen
+    // sent PaymentMethod / ReferenceNo, so every bill payment was stored as a
+    // bank transfer with no reference (found 24 Oct 2026).
+    { name: 'Method', label: 'Method', type: 'select',
+      options: ['Bank transfer', 'Cheque', 'Cash', 'Online'] },
+    { name: 'Reference', label: 'Cheque / transfer reference' },
     { name: 'Remarks', label: 'Remarks', type: 'textarea', span: 2 }
   ];
   const body = UI.el('div');
@@ -14168,7 +14228,8 @@ const PRINT_TITLES = { PO: 'Purchase order', PR: 'Purchase request', GRN: 'Goods
                        VENDORPAY: 'Vendor payment voucher', CASHREPORT: 'Working cash report',
                        VENDORSTMT: 'Vendor statement of account',
                        SUBSTMT: 'Subcontractor statement of account',
-                       SUPINV: 'Supplier invoice' };
+                       SUPINV: 'Supplier invoice',
+                       SUBPAY: 'Subcontractor payment voucher' };
 
 async function printRecord(kind, recordId, options) {
   let payload;
@@ -14264,6 +14325,46 @@ const PRINT_BODIES = {
       ${live.length ? `<p style="margin-top:10px">Paid by: ${live.map(x => UI.esc(x.VendorPaymentID) + ' (' +
         UI.esc(UI.fmt.date(x.PaymentDate)) + ', ' + n(x.Amount) + ')').join('; ')}</p>` : ''}
       <p style="margin-top:14px"><strong>Net payable in words:</strong> ${UI.esc(amountInWords(inv.NetAmount))}</p>`;
+  },
+
+  /**
+   * A subcontractor payment voucher (owner's request, 24 Oct 2026): a bill
+   * payment, an advance or a retention release — to whom, how, against what,
+   * and for a bill what remained on it once this was paid.
+   */
+  SUBPAY(p) {
+    const d = p.data, v = d.payment;
+    const sym = (p.company && p.company.currency) || 'Rs';
+    const money = n => sym + ' ' + UI.fmt.number(n);
+    const what = { Advance: 'Advance', Retention: 'Retention release', Bill: 'Bill payment' }[v.PaymentType] || 'Payment';
+    const s = d.subcontractor, a = d.agreement, b = d.bill;
+    return `
+      ${v.IsReversed ? `<p style="border:1px solid #8C1D18;color:#8C1D18;padding:8px 10px;
+         font-weight:600">This payment was reversed${v.ReversedAt ? ' on ' + UI.esc(UI.fmt.date(v.ReversedAt)) : ''}.
+         ${UI.esc(v.ReversalReason || '')}</p>` : ''}
+      <dl class="kv">
+        <dt>Paid to</dt><dd>${UI.esc(s ? s.CompanyName : v.SubcontractorID)}</dd>
+        ${s && s.CNIC ? `<dt>CNIC</dt><dd>${UI.esc(s.CNIC)}</dd>` : ''}
+        ${s && s.NTN ? `<dt>NTN</dt><dd>${UI.esc(s.NTN)}</dd>` : ''}
+        <dt>Payment</dt><dd>${UI.esc(what)}</dd>
+        <dt>Date</dt><dd>${UI.esc(UI.fmt.date(v.PaymentDate))}</dd>
+        <dt>Method</dt><dd>${UI.esc(v.Method || '—')}</dd>
+        ${v.Reference ? `<dt>Reference</dt><dd>${UI.esc(v.Reference)}</dd>` : ''}
+        ${d.account ? `<dt>Paid from</dt><dd>Working cash — ${UI.esc(d.account.Name || d.account.CashAccountID)}</dd>` : ''}
+        ${d.project ? `<dt>Project</dt><dd>${UI.esc(d.project.ProjectName)}</dd>` : ''}
+        ${a ? `<dt>Agreement</dt><dd>${UI.esc((a.AgreementNumber && a.AgreementNumber !== a.AgreementID ? a.AgreementNumber + ' · ' : '') +
+          a.AgreementID)}${a.Scope ? ' — ' + UI.esc(a.Scope) : ''}</dd>` : ''}
+        ${b ? `<dt>Against bill</dt><dd>${UI.esc(b.BillNumber && b.BillNumber !== b.SubBillID ? b.BillNumber + ' · ' : '')}${UI.esc(b.SubBillID)}</dd>` : ''}
+      </dl>
+      <table class="summary">
+        ${b ? `<tr><td>Bill net payable</td><td class="r">${money(b.NetPayable)}</td></tr>` : ''}
+        <tr class="total"><td>Paid by this voucher</td><td class="r">${money(v.Amount)}</td></tr>
+        ${b ? `<tr><td>Paid on the bill to date</td><td class="r">${money(b.PaidAfter)}</td></tr>
+               <tr><td>Still outstanding on the bill</td><td class="r">${money(b.OutstandingAfter)}</td></tr>` : ''}
+      </table>
+      <p style="margin-top:14px"><strong>In words:</strong> ${UI.esc(amountInWords(v.Amount))}</p>
+      ${v.PaymentType === 'Advance' ? '<p class="muted">To be recovered from the subcontractor\'s bills.</p>' : ''}
+      ${v.Remarks ? `<p><strong>Remarks:</strong> ${UI.esc(v.Remarks)}</p>` : ''}`;
   },
 
   VENDORPAY(p) {
@@ -14473,7 +14574,7 @@ function buildPrintHtml(p) {
   if (bespoke) {
     return UI.print.page({
       company: c, title: title, ref: ref, styles: UI.print.docStyles(),
-      signatures: p.kind === 'VENDORPAY' ? ['Prepared by', 'Approved by', 'Received by']
+      signatures: p.kind === 'VENDORPAY' || p.kind === 'SUBPAY' ? ['Prepared by', 'Approved by', 'Received by']
         : p.kind === 'CASHREPORT' ? ['Custodian', 'Checked by', 'Approved by']
         : p.kind === 'VENDORSTMT' || p.kind === 'SUBSTMT' ? ['Prepared by', 'Checked by']
         : p.kind === 'SUPINV' ? ['Prepared by', 'Checked by', 'Approved by']
@@ -14503,7 +14604,7 @@ function buildPrintHtml(p) {
 const PRINT_REF_FIELD = {
   PO: 'POID', PR: 'PRID', GRN: 'GRNID', ISSUE: 'IssueID', RAR: 'RARID',
   SUBBILL: 'SubBillID', RFQ: 'RFQID', VENDORPAY: 'VendorPaymentID',
-  CASHREPORT: 'CashReportID', SUPINV: 'SupplierInvoiceID'
+  CASHREPORT: 'CashReportID', SUPINV: 'SupplierInvoiceID', SUBPAY: 'SubPaymentID'
 };
 
 /** Turns whichever record shape the server returned into a header block plus lines. */
@@ -14514,7 +14615,7 @@ function flattenForPrint(p) {
   // printed copies came out with no reference number on them at all.
   // A supplier invoice's payload is the one whose record is d.invoice; other
   // payloads (a voucher, a receipt) carry an invoice beside their own record.
-  const record = (p.kind === 'SUPINV' && d.invoice) || d.po || d.pr || d.grn || d.issue || d.rar || d.bill ||
+  const record = (p.kind === 'SUPINV' && d.invoice) || (p.kind === 'SUBPAY' && d.payment) || d.po || d.pr || d.grn || d.issue || d.rar || d.bill ||
                  d.purchaseOrder || d.rfq || d.payment || d.report || d;
   const header = [];
   Object.keys(record).forEach(k => {
