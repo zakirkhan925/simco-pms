@@ -11093,6 +11093,12 @@ async function pageSubcontractor(root, subId) {
      ${d.canLedger ? `<div class="card" style="margin-top:16px">
        <div class="card-head"><h3>Statement of account</h3>
          <div class="filters" style="margin:0">
+           <div class="field"><label for="subLedAgr">Agreement</label>
+             <select class="input" id="subLedAgr"><option value="">All agreements</option>
+               ${(d.agreements || []).map(a => `<option value="${UI.esc(a.AgreementID)}">${UI.esc(
+                 (a.AgreementNumber && a.AgreementNumber !== a.AgreementID ? a.AgreementNumber + ' · ' : '') +
+                 a.AgreementID + (a.ProjectName ? ' — ' + a.ProjectName : ''))}</option>`).join('')}
+             </select></div>
            <div class="field"><label for="subLedFrom">From</label>
              <input class="input" type="date" id="subLedFrom"></div>
            <div class="field"><label for="subLedTo">To</label>
@@ -11158,6 +11164,7 @@ async function pageSubcontractor(root, subId) {
   if (ab) ab.onclick = () => subAdvanceDialog(s, d.agreements, () => navigate('subcontractor', subId));
   if (d.canLedger) {
     document.getElementById('subLedApply').onclick = () => loadSubLedger(subId);
+    document.getElementById('subLedAgr').onchange = () => loadSubLedger(subId);
     document.getElementById('subLedCsv').onclick = () => exportSubLedger(subId);
     document.getElementById('subLedPrint').onclick = () => printRecord('SUBSTMT', subId, subLedWindow());
     loadSubLedger(subId);
@@ -11172,7 +11179,8 @@ async function pageSubcontractor(root, subId) {
  */
 function subLedWindow() {
   return { from: (document.getElementById('subLedFrom') || {}).value || '',
-           to: (document.getElementById('subLedTo') || {}).value || '' };
+           to: (document.getElementById('subLedTo') || {}).value || '',
+           agreementId: (document.getElementById('subLedAgr') || {}).value || '' };
 }
 
 const SUBLED_TONE = { Bill: 'amber', Payment: 'green', Advance: 'blue', Retention: 'violet' };
@@ -11211,7 +11219,8 @@ async function loadSubLedger(subId) {
             (r.document ? `<br><span class="muted">${UI.esc(r.document)}</span>` : '') },
         { key: 'description', label: 'Particulars', render: r =>
           (r.opening ? `<em>${UI.esc(r.description)}</em>` : UI.esc(r.description)) +
-          (r.project ? `<br><span class="muted">${UI.esc(r.project)}</span>` : '') },
+          (r.project || r.agreementId ? `<br><span class="muted">${UI.esc([r.agreementId, r.project]
+            .filter(Boolean).join(' · '))}</span>` : '') },
         { key: 'debit', label: 'Debit', align: 'right', width: '108px', render: r =>
           r.debit ? UI.fmt.number(r.debit) : '<span class="muted">—</span>' },
         { key: 'credit', label: 'Credit', align: 'right', width: '108px', render: r =>
@@ -11248,7 +11257,8 @@ async function exportSubLedger(subId) {
     }
     d.entries.forEach(e => lines.push([UI.fmt.date(e.date), e.type, e.ref, e.document, e.project, e.description,
       e.debit || '', e.credit || '', e.balance].map(esc).join(',')));
-    downloadCsv(`${d.subcontractor.CompanyName.replace(/[^A-Za-z0-9]+/g, '_')}_ledger.csv`, lines.join('\n'));
+    downloadCsv(`${d.subcontractor.CompanyName.replace(/[^A-Za-z0-9]+/g, '_')}` +
+      `${d.agreement ? '_' + d.agreement.AgreementID : ''}_ledger.csv`, lines.join('\n'));
   } catch (e) { UI.error('Could not export the ledger', e.message); }
 }
 
@@ -14329,6 +14339,9 @@ const PRINT_BODIES = {
         <dt>Account of</dt><dd>${UI.esc(v.CompanyName)} (${UI.esc(v.SubcontractorID)})</dd>
         ${v.CNIC ? `<dt>CNIC</dt><dd>${UI.esc(v.CNIC)}</dd>` : ''}
         ${v.NTN ? `<dt>NTN</dt><dd>${UI.esc(v.NTN)}</dd>` : ''}
+        ${d.agreement ? `<dt>Agreement</dt><dd>${UI.esc((d.agreement.AgreementNumber &&
+          d.agreement.AgreementNumber !== d.agreement.AgreementID ? d.agreement.AgreementNumber + ' · ' : '') +
+          d.agreement.AgreementID)}${d.agreement.Scope ? ' — ' + UI.esc(d.agreement.Scope) : ''}</dd>` : ''}
         <dt>Period</dt><dd>${UI.esc(period)}</dd>
       </dl>
       <table>
@@ -14343,7 +14356,7 @@ const PRINT_BODIES = {
             <td>${UI.esc(UI.fmt.date(e.date))}</td>
             <td>${UI.esc(e.ref)}</td>
             <td>${UI.esc(e.document ? e.document + ' — ' : '')}${UI.esc(e.description)}
-              ${e.project ? '<br><small>' + UI.esc(e.project) + '</small>' : ''}</td>
+              ${e.project || e.agreementId ? '<br><small>' + UI.esc([e.agreementId, e.project].filter(Boolean).join(' · ')) + '</small>' : ''}</td>
             <td class="r">${e.debit ? n(e.debit) : ''}</td>
             <td class="r">${e.credit ? n(e.credit) : ''}</td>
             <td class="r">${n(e.balance)}</td></tr>`).join('')}
