@@ -11085,7 +11085,7 @@ async function pageSubcontractor(root, subId) {
      </div>
      ${(d.advances || []).length ? `<div class="card" style="margin-top:16px">
        <div class="card-head"><h3>Cash advances</h3>
-         <span class="muted">Paid from a site float, recovered through the bills</span></div>
+         <span class="muted">Paid by head office or from a site float, recovered through the bills</span></div>
        <div id="subAdvances"></div>
      </div>` : ''}
      ${d.canLedger ? `<div class="card" style="margin-top:16px">
@@ -11351,18 +11351,27 @@ async function loadAgreements() {
     statTile('Contracted', cash(d.summary.contracted), ''),
     statTile('Billed', cash(d.summary.billed), 'gross work approved'),
     statTile('Outstanding', cash(d.summary.outstanding), 'net still to pay')
-  ].join('');
+  ].concat(d.summary.advancePaid === undefined ? [] : [
+    statTile('Advances', cash(d.summary.advancePaid), cash(d.summary.advanceOutstanding) + ' still to recover')
+  ]).join('');
 
   UI.table(mount, {
     columns: [
       { key: 'AgreementID', label: 'Agreement', width: '105px',
         render: r => `<a href="#" class="link" data-agr="${r.AgreementID}">${r.AgreementID}</a>` },
-      { key: 'SubcontractorName', label: 'Subcontractor' },
+      // The name opens the subcontractor: details, advances and the statement of account.
+      { key: 'SubcontractorName', label: 'Subcontractor', render: r => r.SubcontractorID
+          ? `<a href="#" class="link" data-sub="${UI.esc(r.SubcontractorID)}">${UI.esc(r.SubcontractorName || r.SubcontractorID)}</a>`
+          : UI.esc(r.SubcontractorName) },
       { key: 'ProjectName', label: 'Project' },
       { key: 'Scope', label: 'Scope' },
       { key: 'ContractValue', label: 'Value', align: 'right', render: r => cash(r.ContractValue) },
       { key: 'BilledValue', label: 'Billed', align: 'right', render: r => cash(r.BilledValue) },
       { key: 'RemainingValue', label: 'Remaining', align: 'right', render: r => cash(r.RemainingValue) },
+      { key: 'AdvancePaid', label: 'Advance', align: 'right', render: r =>
+          !(Number(r.AdvancePaid) || Number(r.AdvanceOutstanding)) ? '<span class="muted">—</span>'
+            : cash(r.AdvancePaid) + (Number(r.AdvanceOutstanding) > 0
+                ? `<br><span class="muted">${cash(r.AdvanceOutstanding)} to recover</span>` : '') },
       { key: 'Status', label: 'Status', width: '100px', render: r => UI.badge(r.Status, AGREEMENT_TONE[r.Status]) }
     ],
     rows: d.rows,
@@ -11370,6 +11379,9 @@ async function loadAgreements() {
   });
   mount.querySelectorAll('[data-agr]').forEach(a => {
     a.onclick = e => { e.preventDefault(); navigate('agreement', a.dataset.agr); };
+  });
+  mount.querySelectorAll('[data-sub]').forEach(a => {
+    a.onclick = e => { e.preventDefault(); navigate('subcontractor', a.dataset.sub); };
   });
   UI.pager(document.getElementById('agrPager'), {
     page: d.page, totalPages: d.totalPages, total: d.total, pageSize: d.pageSize,
