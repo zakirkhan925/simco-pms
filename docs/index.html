@@ -13353,6 +13353,9 @@ const FILTER_DEFS = {
                options: o => (o.budgetCategories || []).concat(o.expenseCategories || [])
                  .filter((v, i, a) => a.indexOf(v) === i), placeholder: 'All categories' },
   vendorId:  { label: 'Vendor', type: 'select', options: o => o.vendors, placeholder: 'All vendors' },
+  // A server older than 24 Oct 2026 sends no subcontractor list; the filter then has nothing to offer.
+  subcontractorId: { label: 'Subcontractor', type: 'select', options: o => o.subcontractors || [],
+                     placeholder: 'All subcontractors' },
   from:      { label: 'From', type: 'date' },
   to:        { label: 'To', type: 'date' }
 };
