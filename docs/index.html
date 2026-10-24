@@ -11261,7 +11261,8 @@ function subLedWindow() {
            agreementId: (document.getElementById('subLedAgr') || {}).value || '' };
 }
 
-const SUBLED_TONE = { Bill: 'amber', Payment: 'green', Advance: 'blue', Retention: 'violet' };
+const SUBLED_TONE = { Bill: 'amber', Payment: 'green', Advance: 'blue',
+                      'Retention released': 'violet', 'Retention paid': 'green' };
 
 async function loadSubLedger(subId) {
   const host = document.getElementById('subLedger');
@@ -11277,14 +11278,16 @@ async function loadSubLedger(subId) {
            ['Paid', cash(s.paid)],
            ['Advanced', cash(s.advanced)],
            ['Retention released', cash(s.retentionReleased)],
-           ['Balance', cash(s.closingBalance), 'strong']]
+           ['Balance', cash(s.closingBalance), 'strong'],
+           ['Retention held', cash(s.retentionHeld)]]
           .map(t => `<div class="ledger-figure${t[2] ? ' is-total' : ''}">
             <span>${UI.esc(t[0])}</span><strong>${UI.esc(t[1])}</strong></div>`).join('')}
       </div>
       <div class="muted" style="font-size:12.5px;padding:0 16px 10px">
         Balance = payable on approved bills ${cash(s.payableOnBills)}
-        + retention held ${cash(s.retentionHeld)}
-        − advance not yet recovered ${cash(s.advanceUnrecovered)}</div>`;
+        − advance not yet recovered ${cash(s.advanceUnrecovered)}.
+        Bills are entered after retention; retention held (${cash(s.retentionHeld)}) is not in the balance
+        and comes in when it is released.</div>`;
     const rows = [{ opening: true, description: 'Balance brought forward', balance: d.openingBalance }]
       .concat(d.entries);
     UI.table(host, {
@@ -14495,9 +14498,11 @@ const PRINT_BODIES = {
       </table>
       <table style="margin-top:14px;width:auto">
         <tr><td>Payable on approved bills</td><td class="r">${n(s.payableOnBills)}</td></tr>
-        <tr><td>Retention held</td><td class="r">${n(s.retentionHeld)}</td></tr>
         <tr><td>Less advance not yet recovered</td><td class="r">${n(s.advanceUnrecovered)}</td></tr>
+        <tr class="total"><td>Balance</td><td class="r">${n(s.closingBalance)}</td></tr>
       </table>
+      <p class="muted" style="margin-top:10px">Bills are entered after retention. Retention held, not in the
+        balance and payable when released: ${n(s.retentionHeld)}.</p>
       <p style="margin-top:14px">Payable now on approved bills: <strong>${UI.esc(amountInWords(s.payableOnBills))}</strong></p>`;
   },
 
