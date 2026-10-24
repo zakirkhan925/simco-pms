@@ -7463,6 +7463,10 @@ async function openPoEditForm(d) {
 
 function buildPoForm(existing, projects, vendors) {
   const fromRfq = existing && existing.po.RFQID;
+  // Approved and not fully received (24 Oct 2026): a change to money needs a
+  // reason and sends the order back for approval; dates and terms do not.
+  const revising = !!(existing && existing.isRevision);
+  const rateLocked = new Set((existing && existing.rateLockedItems) || []);
   const fields = [
     { name: 'ProjectID', label: 'Project', type: 'select', required: true, readonly: !!existing,
       options: projects.map(p => ({ value: p.ProjectID, label: p.ProjectName })) },
@@ -7474,7 +7478,8 @@ function buildPoForm(existing, projects, vendors) {
     { name: 'DiscountPercent', label: 'Discount %', type: 'number', value: 0 },
     { name: 'TaxPercent', label: 'Tax %', type: 'number', value: 0 },
     { name: 'Remarks', label: 'Remarks', type: 'textarea', span: 2 }
-  ];
+  ].concat(revising ? [{ name: 'Reason', label: 'Reason for the change', type: 'textarea', span: 2,
+    hint: 'Needed when quantities, rates, items, discount or tax change.' }] : []);
   const values = existing ? {
     ProjectID: existing.po.ProjectID, VendorID: existing.po.VendorID,
     DeliveryDate: existing.po.DeliveryDate, DeliveryLocation: existing.po.DeliveryLocation,
@@ -7483,12 +7488,18 @@ function buildPoForm(existing, projects, vendors) {
   } : {};
 
   const body = UI.el('div');
+  if (revising) {
+    body.appendChild(UI.el('div', { class: 'banner banner-warn' }, `<div>This order is
+      <strong>${UI.esc(existing.po.Status)}</strong>. Delivery date, place, payment terms and remarks change at once.
+      Changing quantities, rates, items, discount or tax sends it <strong>back for approval</strong>, and nothing
+      more can be received until it is approved again.</div>`));
+  }
   const form = UI.form(fields, values);
   body.appendChild(form);
 
   const itemsWrap = UI.el('div', { class: 'card mt-16' });
   itemsWrap.innerHTML = `<div class="card-head"><div class="card-title">Lines</div>
-    ${fromRfq ? '<span class="muted">Rates come from the awarded quotation</span>'
+    ${fromRfq ? '<span class="muted">Rates and items come from the awarded quotation; quantities can change</span>'
               : '<button class="btn btn-sm" id="addPoItem">+ Add line</button>'}</div>
     <div class="table-wrap"><table class="data" id="poItemTable">
       <thead><tr><th style="width:110px">Code</th><th>Item</th><th style="width:90px">Unit</th>
@@ -7523,20 +7534,28 @@ function buildPoForm(existing, projects, vendors) {
   function addRow(v) {
     v = v || {};
     const tr = UI.el('tr');
+    const received = Number(v.ReceivedQty) || 0;
     tr.innerHTML =
-      `<td><input class="input" data-f="ItemCode" value="${UI.esc(v.ItemCode || '')}"></td>
+      `<td><input type="hidden" data-f="POItemID" value="${UI.esc(v.POItemID || '')}">
+         <input class="input" data-f="ItemCode" value="${UI.esc(v.ItemCode || '')}"></td>
        <td><input class="input" data-f="ItemName" value="${UI.esc(v.ItemName || '')}"></td>
        <td><select class="input" data-f="Unit">${units.map(u =>
          `<option value="${u}"${u === v.Unit ? ' selected' : ''}>${u}</option>`).join('')}</select></td>
        <td><input class="input" data-f="CostCode" value="${UI.esc(v.CostCode || '')}"></td>
        <td><input class="input num" type="number" step="any" data-f="OrderedQty"
-            value="${v.OrderedQty === undefined ? '' : v.OrderedQty}" style="text-align:right"></td>
+            value="${v.OrderedQty === undefined ? '' : v.OrderedQty}" style="text-align:right"
+            ${received ? `min="${received}"` : ''}>
+            ${received ? `<div class="muted" style="font-size:11.5px;text-align:right">${UI.fmt.number(received)} received</div>` : ''}</td>
        <td><input class="input" type="number" step="any" data-f="Rate"
-            value="${v.Rate === undefined ? '' : v.Rate}" style="text-align:right"></td>
+            value="${v.Rate === undefined ? '' : v.Rate}" style="text-align:right">
+            ${rateLocked.has(v.POItemID) ? '<div class="muted" style="font-size:11.5px;text-align:right">invoiced</div>' : ''}</td>
        <td class="num" data-amount>0</td>
-       <td>${fromRfq ? '' : '<button class="btn btn-sm btn-ghost" data-remove>&times;</button>'}</td>`;
+       <td>${fromRfq || received ? '' : '<button class="btn btn-sm btn-ghost" data-remove>&times;</button>'}</td>`;
     tr.querySelectorAll('input').forEach(i => i.addEventListener('input', recalc));
-    if (fromRfq) tr.querySelectorAll('input, select').forEach(i => { i.readOnly = true; i.disabled = true; });
+    // An order from an RFQ keeps the quotation's items and rates; only the
+    // quantity can change. A rate on an invoiced line is fixed.
+    if (fromRfq) tr.querySelectorAll('input:not([data-f="OrderedQty"]), select').forEach(i => { i.readOnly = true; i.disabled = true; });
+    if (rateLocked.has(v.POItemID)) { const r = tr.querySelector('[data-f="Rate"]'); r.readOnly = true; r.disabled = true; }
     const rm = tr.querySelector('[data-remove]');
     if (rm) rm.onclick = () => {
       if (tbody.querySelectorAll('tr').length === 1) { UI.warn('An order needs at least one line'); return; }
@@ -7564,15 +7583,21 @@ function buildPoForm(existing, projects, vendors) {
           tr.querySelectorAll('[data-f]').forEach(f => { row[f.dataset.f] = f.value.trim(); });
           if (!row.ItemName) bad = bad || ('Line ' + (i + 1) + ' needs an item name.');
           if (!(Number(row.OrderedQty) > 0)) bad = bad || ('Line ' + (i + 1) + ' needs a quantity.');
+          const min = Number(tr.querySelector('[data-f="OrderedQty"]').min || 0);
+          if (min && Number(row.OrderedQty) < min) bad = bad || ('Line ' + (i + 1) + ': ' + min + ' has already been received.');
           items.push(row);
         });
         if (bad) { UI.warn('Check the lines', bad); return; }
         m.busy(true);
         try {
           if (existing) {
-            await api('updatePurchaseOrder', existing.po.POID,
-              fromRfq ? head : Object.assign({}, head, { items: items }));
-            m.close(); UI.success('Order saved');
+            // The lines go with their ids even from an RFQ: the server keeps
+            // the quotation's items and rates and checks what was received.
+            // (A server older than 24 Oct 2026 sends no isRevision and would
+            // replace an RFQ order's lines outright, so they are not sent to it.)
+            const res = await api('updatePurchaseOrder', existing.po.POID,
+              fromRfq && existing.isRevision === undefined ? head : Object.assign({}, head, { items: items }));
+            m.close(); UI.success('Order saved', res.message);
             navigate('purchase-order', existing.po.POID);
           } else {
             const res = await api('createPurchaseOrder', head.ProjectID,
