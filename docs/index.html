@@ -11087,6 +11087,20 @@ async function pageSubcontractor(root, subId) {
        <div class="card-head"><h3>Cash advances</h3>
          <span class="muted">Paid from a site float, recovered through the bills</span></div>
        <div id="subAdvances"></div>
+     </div>` : ''}
+     ${d.canLedger ? `<div class="card" style="margin-top:16px">
+       <div class="card-head"><h3>Statement of account</h3>
+         <div class="filters" style="margin:0">
+           <div class="field"><label for="subLedFrom">From</label>
+             <input class="input" type="date" id="subLedFrom"></div>
+           <div class="field"><label for="subLedTo">To</label>
+             <input class="input" type="date" id="subLedTo"></div>
+           <button class="btn btn-sm" id="subLedApply">Apply</button>
+           <button class="btn btn-sm" id="subLedPrint">Print statement</button>
+           <button class="btn btn-sm" id="subLedCsv">Export</button>
+         </div></div>
+       <div id="subLedgerSummary"></div>
+       <div id="subLedger">${UI.loadingState()}</div>
      </div>` : ''}`;
 
   UI.table(document.getElementById('subAgreements'), {
@@ -11140,6 +11154,100 @@ async function pageSubcontractor(root, subId) {
   if (nb) nb.onclick = () => agreementForm(null, subId, () => navigate('subcontractor', subId));
   const ab = document.getElementById('subAdvBtn');
   if (ab) ab.onclick = () => subAdvanceDialog(s, d.agreements, () => navigate('subcontractor', subId));
+  if (d.canLedger) {
+    document.getElementById('subLedApply').onclick = () => loadSubLedger(subId);
+    document.getElementById('subLedCsv').onclick = () => exportSubLedger(subId);
+    document.getElementById('subLedPrint').onclick = () => printRecord('SUBSTMT', subId, subLedWindow());
+    loadSubLedger(subId);
+  }
+}
+
+/* ------------------------------------------- SUBCONTRACTOR LEDGER (24 Oct 2026)
+ * One running account per subcontractor, as the vendor's. A bill goes in at
+ * its full value; advances, payments and retention releases come off it.
+ * The balance is split below the figures into payable on bills, retention
+ * held and advance not yet recovered, which add up to it.
+ */
+function subLedWindow() {
+  return { from: (document.getElementById('subLedFrom') || {}).value || '',
+           to: (document.getElementById('subLedTo') || {}).value || '' };
+}
+
+const SUBLED_TONE = { Bill: 'amber', Payment: 'green', Advance: 'blue', Retention: 'violet' };
+
+async function loadSubLedger(subId) {
+  const host = document.getElementById('subLedger');
+  if (!host) return;
+  host.innerHTML = UI.loadingState();
+  try {
+    const d = (await api('getSubcontractorLedger', subId, subLedWindow())).data;
+    const s = d.summary;
+    document.getElementById('subLedgerSummary').innerHTML =
+      `<div class="ledger-figures">
+        ${[['Opening', cash(d.openingBalance)],
+           ['Billed', cash(s.billed)],
+           ['Paid', cash(s.paid)],
+           ['Advanced', cash(s.advanced)],
+           ['Retention released', cash(s.retentionReleased)],
+           ['Balance', cash(s.closingBalance), 'strong']]
+          .map(t => `<div class="ledger-figure${t[2] ? ' is-total' : ''}">
+            <span>${UI.esc(t[0])}</span><strong>${UI.esc(t[1])}</strong></div>`).join('')}
+      </div>
+      <div class="muted" style="font-size:12.5px;padding:0 16px 10px">
+        Balance = payable on approved bills ${cash(s.payableOnBills)}
+        + retention held ${cash(s.retentionHeld)}
+        − advance not yet recovered ${cash(s.advanceUnrecovered)}</div>`;
+    const rows = [{ opening: true, description: 'Balance brought forward', balance: d.openingBalance }]
+      .concat(d.entries);
+    UI.table(host, {
+      columns: [
+        { key: 'date', label: 'Date', width: '96px', render: r => r.opening ? '' : UI.fmt.date(r.date) },
+        { key: 'type', label: 'Type', width: '92px', render: r =>
+          r.opening ? '' : UI.badge(r.type, SUBLED_TONE[r.type] || 'grey') },
+        { key: 'ref', label: 'Reference', width: '130px', render: r =>
+          r.opening ? '' : `<span class="mono nowrap">${UI.esc(r.ref)}</span>` +
+            (r.document ? `<br><span class="muted">${UI.esc(r.document)}</span>` : '') },
+        { key: 'description', label: 'Particulars', render: r =>
+          (r.opening ? `<em>${UI.esc(r.description)}</em>` : UI.esc(r.description)) +
+          (r.project ? `<br><span class="muted">${UI.esc(r.project)}</span>` : '') },
+        { key: 'debit', label: 'Debit', align: 'right', width: '108px', render: r =>
+          r.debit ? UI.fmt.number(r.debit) : '<span class="muted">—</span>' },
+        { key: 'credit', label: 'Credit', align: 'right', width: '108px', render: r =>
+          r.credit ? UI.fmt.number(r.credit) : '<span class="muted">—</span>' },
+        { key: 'balance', label: 'Balance', align: 'right', width: '116px', render: r =>
+          `<strong>${UI.fmt.number(r.balance)}</strong>` },
+        { key: 'actions', label: '', align: 'right', width: '80px', render: r =>
+          r.type === 'Bill' ? `<div class="row-actions"><button class="btn btn-sm"
+             data-subbill="${UI.esc(r.ref)}">Open</button></div>` : '' }
+      ],
+      rows: rows,
+      empty: UI.emptyState('Nothing on the account', 'Approved bills and payments appear here.')
+    });
+    host.querySelectorAll('[data-subbill]').forEach(b => {
+      b.onclick = () => navigate('subbill', b.dataset.subbill);
+    });
+  } catch (e) {
+    host.innerHTML = UI.errorState(e.message, 'retrySubLedger');
+    const b = document.getElementById('retrySubLedger');
+    if (b) b.onclick = () => loadSubLedger(subId);
+  }
+}
+
+async function exportSubLedger(subId) {
+  try {
+    const d = (await api('getSubcontractorLedger', subId, subLedWindow())).data;
+    const esc = v => {
+      const t = String(v === undefined || v === null ? '' : v);
+      return /[",\n]/.test(t) ? '"' + t.replace(/"/g, '""') + '"' : t;
+    };
+    const lines = [['Date', 'Type', 'Reference', 'Document', 'Project', 'Detail', 'Debit', 'Credit', 'Balance'].join(',')];
+    if (d.openingBalance) {
+      lines.push(['', 'Opening', '', '', '', 'Balance brought forward', '', '', d.openingBalance].map(esc).join(','));
+    }
+    d.entries.forEach(e => lines.push([UI.fmt.date(e.date), e.type, e.ref, e.document, e.project, e.description,
+      e.debit || '', e.credit || '', e.balance].map(esc).join(',')));
+    downloadCsv(`${d.subcontractor.CompanyName.replace(/[^A-Za-z0-9]+/g, '_')}_ledger.csv`, lines.join('\n'));
+  } catch (e) { UI.error('Could not export the ledger', e.message); }
 }
 
 /**
@@ -14009,7 +14117,8 @@ const PRINT_TITLES = { PO: 'Purchase order', PR: 'Purchase request', GRN: 'Goods
                        ISSUE: 'Material issue note', RAR: 'Running account bill',
                        SUBBILL: 'Subcontractor bill', RFQ: 'Request for quotation',
                        VENDORPAY: 'Vendor payment voucher', CASHREPORT: 'Working cash report',
-                       VENDORSTMT: 'Vendor statement of account' };
+                       VENDORSTMT: 'Vendor statement of account',
+                       SUBSTMT: 'Subcontractor statement of account' };
 
 async function printRecord(kind, recordId, options) {
   let payload;
@@ -14138,6 +14247,53 @@ const PRINT_BODIES = {
       <p style="margin-top:14px">Amount payable: <strong>${UI.esc(amountInWords(s.closingBalance))}</strong></p>`;
   },
 
+  /**
+   * The subcontractor's statement: each approved bill at its full value,
+   * advances, payments and retention releases against it. Below the line the
+   * balance is split into what the bills make payable now, the retention
+   * still held, and the advance still to be recovered.
+   */
+  SUBSTMT(p) {
+    const d = p.data, v = d.subcontractor, s = d.summary;
+    const n = x => UI.fmt.number(x);
+    const period = (d.from || d.to)
+      ? `${d.from ? UI.fmt.date(d.from) : 'the beginning'} to ${d.to ? UI.fmt.date(d.to) : 'date'}`
+      : 'All transactions to date';
+    return `
+      <dl class="kv">
+        <dt>Account of</dt><dd>${UI.esc(v.CompanyName)} (${UI.esc(v.SubcontractorID)})</dd>
+        ${v.CNIC ? `<dt>CNIC</dt><dd>${UI.esc(v.CNIC)}</dd>` : ''}
+        ${v.NTN ? `<dt>NTN</dt><dd>${UI.esc(v.NTN)}</dd>` : ''}
+        <dt>Period</dt><dd>${UI.esc(period)}</dd>
+      </dl>
+      <table>
+        <thead><tr><th style="width:92px">Date</th><th style="width:96px">Reference</th>
+          <th>Particulars</th><th class="r" style="width:100px">Debit</th>
+          <th class="r" style="width:100px">Credit</th>
+          <th class="r" style="width:110px">Balance</th></tr></thead>
+        <tbody>
+          <tr><td></td><td></td><td><em>Balance brought forward</em></td>
+            <td></td><td></td><td class="r">${n(d.openingBalance)}</td></tr>
+          ${(d.entries || []).map(e => `<tr>
+            <td>${UI.esc(UI.fmt.date(e.date))}</td>
+            <td>${UI.esc(e.ref)}</td>
+            <td>${UI.esc(e.document ? e.document + ' — ' : '')}${UI.esc(e.description)}
+              ${e.project ? '<br><small>' + UI.esc(e.project) + '</small>' : ''}</td>
+            <td class="r">${e.debit ? n(e.debit) : ''}</td>
+            <td class="r">${e.credit ? n(e.credit) : ''}</td>
+            <td class="r">${n(e.balance)}</td></tr>`).join('')}
+        </tbody>
+        <tfoot><tr class="total"><td colspan="5">Balance</td>
+          <td class="r">${n(s.closingBalance)}</td></tr></tfoot>
+      </table>
+      <table style="margin-top:14px;width:auto">
+        <tr><td>Payable on approved bills</td><td class="r">${n(s.payableOnBills)}</td></tr>
+        <tr><td>Retention held</td><td class="r">${n(s.retentionHeld)}</td></tr>
+        <tr><td>Less advance not yet recovered</td><td class="r">${n(s.advanceUnrecovered)}</td></tr>
+      </table>
+      <p style="margin-top:14px">Payable now on approved bills: <strong>${UI.esc(amountInWords(s.payableOnBills))}</strong></p>`;
+  },
+
   CASHREPORT(p) {
     const d = p.data, r = d.report, a = d.account || {};
     const n = x => UI.fmt.number(x);
@@ -14216,7 +14372,7 @@ function buildPrintHtml(p) {
       company: c, title: title, ref: ref, styles: UI.print.docStyles(),
       signatures: p.kind === 'VENDORPAY' ? ['Prepared by', 'Approved by', 'Received by']
         : p.kind === 'CASHREPORT' ? ['Custodian', 'Checked by', 'Approved by']
-        : p.kind === 'VENDORSTMT' ? ['Prepared by', 'Checked by']
+        : p.kind === 'VENDORSTMT' || p.kind === 'SUBSTMT' ? ['Prepared by', 'Checked by']
         : ['Prepared by', 'Approved by'],
       body: bespoke(p)
     });
