@@ -14381,6 +14381,56 @@ const PRINT_BODIES = {
       ${v.Remarks ? `<p><strong>Remarks:</strong> ${UI.esc(v.Remarks)}</p>` : ''}`;
   },
 
+  /**
+   * A subcontractor bill (owner's request, 28 Oct 2026): whose bill, on which
+   * agreement and project, by name; the measurement against the agreement
+   * lines; and the arithmetic from work done to net payable, with what has
+   * been paid and what is still owed.
+   */
+  SUBBILL(p) {
+    const d = p.data, b = d.bill, a = d.agreement || {}, s = d.subcontractor || {}, L = p.labels || {};
+    const sym = (p.company && p.company.currency) || 'Rs';
+    const n = x => UI.fmt.number(x), money = x => sym + ' ' + UI.fmt.number(x);
+    const both = (id, name) => UI.esc(id || '—') + (name ? ' — ' + UI.esc(name) : '');
+    const items = d.items || [];
+    const paid = Number(d.paidToDate) || 0;
+    return `
+      <dl class="kv">
+        <dt>Subcontractor</dt><dd>${both(s.SubcontractorID, s.CompanyName)}</dd>
+        ${s.CNIC ? `<dt>CNIC</dt><dd>${UI.esc(s.CNIC)}</dd>` : ''}
+        <dt>Agreement</dt><dd>${both(a.AgreementNumber && a.AgreementNumber !== b.AgreementID
+          ? a.AgreementNumber + ' · ' + b.AgreementID : b.AgreementID, a.Scope)}</dd>
+        <dt>Project</dt><dd>${both(b.ProjectID, L.ProjectID)}</dd>
+        ${b.BillNumber && b.BillNumber !== b.SubBillID ? `<dt>Bill number</dt><dd>${UI.esc(b.BillNumber)}</dd>` : ''}
+        <dt>Bill date</dt><dd>${UI.esc(UI.fmt.date(b.BillDate))}</dd>
+        <dt>Period</dt><dd>${UI.esc(UI.fmt.date(b.PeriodFrom))} to ${UI.esc(UI.fmt.date(b.PeriodTo))}</dd>
+        <dt>Status</dt><dd>${UI.esc(b.Status)}</dd>
+        ${b.ApprovedBy ? `<dt>Approved by</dt><dd>${both(b.ApprovedBy, L.ApprovedBy)}${b.ApprovedAt
+          ? ' on ' + UI.esc(UI.fmt.date(b.ApprovedAt)) : ''}</dd>` : ''}
+      </dl>
+      ${items.length ? `<table>
+        <thead><tr><th>Description</th><th>Unit</th><th class="r">Rate</th><th class="r">Contract qty</th>
+          <th class="r">Previous</th><th class="r">This bill</th><th class="r">Cumulative</th>
+          <th class="r">Previous amount</th><th class="r">This bill amount</th><th class="r">Cumulative amount</th></tr></thead>
+        <tbody>${items.map(i => `<tr>
+          <td>${UI.esc([i.ItemCode, i.Description].filter(Boolean).join(' — '))}</td><td>${UI.esc(i.Unit || '')}</td>
+          <td class="r">${n(i.Rate)}</td><td class="r">${n(i.ContractQty)}</td><td class="r">${n(i.PreviousQty)}</td>
+          <td class="r"><strong>${n(i.CurrentQty)}</strong></td><td class="r">${n(i.CumulativeQty)}</td>
+          <td class="r">${n(i.PreviousAmount)}</td><td class="r"><strong>${n(i.CurrentAmount)}</strong></td>
+          <td class="r">${n(i.CumulativeAmount)}</td></tr>`).join('')}</tbody>
+      </table>` : '<p class="muted">Lump-sum bill — no measured lines.</p>'}
+      <table class="summary">
+        <tr><td>Work done this period</td><td class="r">${money(b.GrossAmount)}</td></tr>
+        <tr><td>Less retention</td><td class="r">− ${n(b.RetentionAmount)}</td></tr>
+        <tr><td>Less advance recovery</td><td class="r">− ${n(b.AdvanceRecovery)}</td></tr>
+        ${Number(b.TaxAmount) ? `<tr><td>Add tax</td><td class="r">${n(b.TaxAmount)}</td></tr>` : ''}
+        <tr class="total"><td>Net payable</td><td class="r">${money(b.NetPayable)}</td></tr>
+        ${paid ? `<tr><td>Paid to date</td><td class="r">${money(paid)}</td></tr>
+                  <tr class="total"><td>Outstanding</td><td class="r">${money(d.outstanding)}</td></tr>` : ''}
+      </table>
+      <p style="margin-top:14px"><strong>Net payable in words:</strong> ${UI.esc(amountInWords(b.NetPayable))}</p>`;
+  },
+
   VENDORPAY(p) {
     const d = p.data, v = d.payment;
     const sym = (p.company && p.company.currency) || 'Rs';
@@ -14617,7 +14667,7 @@ function buildPrintHtml(p) {
       signatures: p.kind === 'VENDORPAY' || p.kind === 'SUBPAY' ? ['Prepared by', 'Approved by', 'Received by']
         : p.kind === 'CASHREPORT' ? ['Custodian', 'Checked by', 'Approved by']
         : p.kind === 'VENDORSTMT' || p.kind === 'SUBSTMT' ? ['Prepared by', 'Checked by']
-        : p.kind === 'SUPINV' ? ['Prepared by', 'Checked by', 'Approved by']
+        : p.kind === 'SUPINV' || p.kind === 'SUBBILL' ? ['Prepared by', 'Checked by', 'Approved by']
         : ['Prepared by', 'Approved by'],
       body: bespoke(p)
     });
@@ -14632,9 +14682,10 @@ function buildPrintHtml(p) {
         `<dt>${UI.esc(kv[0])}</dt><dd>${UI.esc(kv[1])}</dd>`).join('')}</dl>` +
       (rows.lines.length
         ? `<table><thead><tr>${rows.lineCols.map(h =>
-            `<th class="${isNum(h) ? 'r' : ''}">${UI.esc(h)}</th>`).join('')}</tr></thead><tbody>` +
+            `<th class="${isNum(h) ? 'r' : ''}">${UI.esc(h.replace(/([a-z])([A-Z])/g, '$1 $2'))}</th>`).join('')}</tr></thead><tbody>` +
           rows.lines.map(l => `<tr>${rows.lineCols.map(h =>
-            `<td class="${isNum(h) ? 'r' : ''}">${UI.esc(l[h] === undefined ? '' : l[h])}</td>`).join('')}</tr>`).join('') +
+            `<td class="${isNum(h) || typeof l[h] === 'number' ? 'r' : ''}">${UI.esc(l[h] === undefined || l[h] === null
+              ? '' : printValue(h, l[h]))}</td>`).join('')}</tr>`).join('') +
           `</tbody></table>`
         : '')
   });
@@ -14647,6 +14698,15 @@ const PRINT_REF_FIELD = {
   CASHREPORT: 'CashReportID', SUPINV: 'SupplierInvoiceID', SUBPAY: 'SubPaymentID'
 };
 
+/** A header value as it should read on paper: dates as dates, amounts with separators. */
+function printValue(key, v) {
+  if (typeof v === 'number') return UI.fmt.number(v);
+  if (typeof v === 'string' && /^\d{4}-\d{2}-\d{2}(T|$)/.test(v)) {
+    return /T/.test(v) && !/(Date|From|To)$/.test(key) ? UI.fmt.dateTime(v) : UI.fmt.date(v);
+  }
+  return v;
+}
+
 /** Turns whichever record shape the server returned into a header block plus lines. */
 function flattenForPrint(p) {
   const d = p.data || {};
@@ -14658,11 +14718,16 @@ function flattenForPrint(p) {
   const record = (p.kind === 'SUPINV' && d.invoice) || (p.kind === 'SUBPAY' && d.payment) || d.po || d.pr || d.grn || d.issue || d.rar || d.bill ||
                  d.purchaseOrder || d.rfq || d.payment || d.report || d;
   const header = [];
+  // Each id shows its name beside it, flags for the screen ("Is Editable") are
+  // left out, and dates and amounts read as people write them (28 Oct 2026).
+  const labels = p.labels || {};
   Object.keys(record).forEach(k => {
     const v = record[k];
-    if (v === null || v === undefined || v === '' || typeof v === 'object') return;
-    if (/^(CreatedBy|UpdatedBy|CreatedAt|UpdatedAt)$/.test(k)) return;
-    header.push([k.replace(/([a-z])([A-Z])/g, '$1 $2'), v]);
+    if (v === null || v === undefined || v === '' || typeof v === 'object' || typeof v === 'boolean') return;
+    if (/^(UpdatedBy|CreatedAt|UpdatedAt)$/.test(k) || /^Is[A-Z]/.test(k)) return;
+    // "GRNNumber" → "GRN Number", "POID" → "PO ID", "ReceiptDate" → "Receipt Date".
+    header.push([k.replace(/([a-z])([A-Z])/g, '$1 $2').replace(/([A-Z]{2,})(Number|ID)$/, '$1 $2'), printValue(k, v) +
+      (labels[k] ? ' — ' + labels[k] : '')]);
   });
   // The record's own id heads the document; repeating it in the detail list
   // would just be the same string twice.
@@ -14673,7 +14738,8 @@ function flattenForPrint(p) {
   const ref = record[PRINT_REF_FIELD[p.kind]] || '';
   const lines = d.items || d.lines || d.poItems || d.prItems || [];
   const lineCols = lines.length
-    ? Object.keys(lines[0]).filter(k => typeof lines[0][k] !== 'object' && !/ID$/.test(k))
+    ? Object.keys(lines[0]).filter(k => typeof lines[0][k] !== 'object' && typeof lines[0][k] !== 'boolean' &&
+        !/ID$/.test(k) && !/^Is[A-Z]/.test(k))
     : [];
   return { ref: ref, header: header.slice(0, 16), lines: lines, lineCols: lineCols };
 }
