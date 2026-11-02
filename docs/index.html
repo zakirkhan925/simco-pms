@@ -13344,9 +13344,12 @@ async function pageReports(root, arg) {
   document.getElementById('reportExport').onclick = exportCurrentReport;
   // Statements of account print one statement to a page, each as the party's own
   // statement prints (26 Oct 2026); every other report prints the screen.
+  // The weekly user progress prints as a landscape document (2 Nov 2026): too wide for the screen print.
   document.getElementById('reportPrint').onclick = () => reportState.id === 'statements'
     ? printRecord('STATEMENTS', '', readReportFilters())
-    : window.print();
+    : reportState.id === 'user-progress'
+      ? printRecord('REPORT', 'user-progress', readReportFilters())
+      : window.print();
 
   const first = preselect && cat.reports.some(r => r.id === preselect) ? preselect : cat.reports[0].id;
   await selectReport(first, projectScope);
@@ -13436,6 +13439,8 @@ function reportCell(col, row) {
     // A blank amount stays blank: a statement's opening and closing lines have no debit or credit.
     case 'money': return (v === '' || v === null || v === undefined) ? '' : cash(v);
     case 'number': return UI.fmt.number(v, 0);
+    // A day with nothing in it reads as a dash, as on the owner's weekly sheet.
+    case 'count': return v ? UI.fmt.number(v, 0) : '<span class="muted">–</span>';
     case 'qty': return UI.fmt.number(v, 2);
     case 'percent': return (v === '' || v === null || v === undefined) ? '—' : UI.fmt.percent(v);
     case 'date': return UI.fmt.date(v);
@@ -13454,7 +13459,7 @@ function renderReport(d) {
     UI.table(mount, {
       columns: d.columns.map(c => ({
         key: c.key, label: c.label,
-        align: ['money', 'number', 'qty', 'percent'].indexOf(c.type) !== -1 ? 'right' : '',
+        align: ['money', 'number', 'count', 'qty', 'percent'].indexOf(c.type) !== -1 ? 'right' : '',
         render: row => {
           const html = reportCell(c, row);
           if (c.signed && typeof row[c.key] === 'number' && row[c.key] !== 0) {
@@ -13471,7 +13476,7 @@ function renderReport(d) {
       const tfoot = UI.el('tfoot', { class: 'report-totals' });
       const tr = UI.el('tr');
       d.columns.forEach((c, i) => {
-        const td = UI.el('td', { class: ['money', 'number', 'qty', 'percent'].indexOf(c.type) !== -1 ? 'num' : '' });
+        const td = UI.el('td', { class: ['money', 'number', 'count', 'qty', 'percent'].indexOf(c.type) !== -1 ? 'num' : '' });
         if (i === 0) td.textContent = 'Total · ' + d.rowCount + ' row' + (d.rowCount === 1 ? '' : 's');
         else if (d.totals[c.key] !== undefined) td.innerHTML = c.type === 'money'
           ? cash(d.totals[c.key]) : UI.fmt.number(d.totals[c.key], 0);
@@ -13481,11 +13486,30 @@ function renderReport(d) {
       table.appendChild(tfoot);
     }
   }
+  // A report may send charts (the weekly user progress does); an older server sends none.
+  if (d.rows.length && d.charts && d.charts.length) {
+    d.charts.forEach(ch => mount.appendChild(renderReportChart(ch)));
+  }
   document.getElementById('reportMeta').innerHTML =
     `<span>${d.rowCount} row${d.rowCount === 1 ? '' : 's'}</span>` +
     `<span>Run by ${UI.esc(d.generatedBy)}</span>` +
     `<span>${UI.fmt.dateTime(d.generatedAt)}</span>` +
     (d.note ? `<span class="muted">${UI.esc(d.note)}</span>` : '');
+}
+
+/** A plain bar chart: one row a bar, the value beside it. */
+function renderReportChart(ch) {
+  const box = UI.el('div', { class: 'card-body report-chart' });
+  const max = Math.max(1, ...ch.bars.map(b => b.value));
+  box.innerHTML = `<div class="card-title" style="margin-bottom:8px">${UI.esc(ch.title)}</div>` +
+    (ch.bars.length ? '<div class="bar-chart">' + ch.bars.map(b =>
+      `<div class="bar-row">
+         <div class="bar-label">${UI.esc(b.label)}</div>
+         <div class="bar-track"><div class="bar bar-received" style="width:${Math.round(b.value / max * 100)}%"></div></div>
+         <div class="bar-value">${UI.fmt.number(b.value, 0)}</div>
+       </div>`).join('') + '</div>'
+      : '<p class="muted" style="margin:0">Nothing in this period.</p>');
+  return box;
 }
 
 async function exportCurrentReport() {
@@ -14653,8 +14677,69 @@ function buildStatementsHtml(p) {
     </head><body>${pages || `<p>No statements for ${UI.esc(period)}.</p>`}</body></html>`;
 }
 
+/**
+ * A report printed as a document (2 Nov 2026, the weekly user progress): on a
+ * landscape page with the letterhead, the table with its totals, the charts
+ * and the report's own note, as the owner's weekly sheet was laid out.
+ */
+function buildReportPrintHtml(p) {
+  const d = p.data || {}, cols = d.columns || [], rows = d.rows || [], totals = d.totals || {};
+  const numeric = c => ['money', 'number', 'count', 'qty', 'percent'].indexOf(c.type) !== -1;
+  const cell = (c, v) => {
+    if (v === null || v === undefined || v === '') return c.type === 'count' ? '–' : '';
+    switch (c.type) {
+      case 'count': return v ? UI.fmt.number(v, 0) : '–';
+      case 'number': return UI.fmt.number(v, 0);
+      case 'qty': return UI.fmt.number(v, 2);
+      case 'money': return cash(v);
+      case 'percent': return UI.fmt.percent(v);
+      case 'date': return UI.fmt.date(v);
+      default: return UI.esc(v);
+    }
+  };
+  const filters = d.appliedFilters || {};
+  const period = filters.from || filters.to
+    ? `${filters.from ? UI.fmt.date(filters.from) : '…'} to ${filters.to ? UI.fmt.date(filters.to) : '…'}` : '';
+  const table = `<table class="rep"><thead><tr>${cols.map(c =>
+      `<th class="${numeric(c) ? 'r' : ''}">${UI.esc(c.label)}</th>`).join('')}</tr></thead>
+    <tbody>${rows.map(r => `<tr>${cols.map(c =>
+      `<td class="${numeric(c) ? 'r' : ''}">${cell(c, r[c.key])}</td>`).join('')}</tr>`).join('')}</tbody>
+    ${Object.keys(totals).length ? `<tfoot><tr>${cols.map((c, i) => `<td class="${numeric(c) ? 'r' : ''}">${
+      i === 0 ? 'Total' : totals[c.key] === undefined ? '' : cell(c, totals[c.key])}</td>`).join('')}</tr></tfoot>` : ''}
+    </table>`;
+  const charts = (d.charts || []).map(ch => {
+    const max = Math.max(1, ...ch.bars.map(b => b.value));
+    return `<div class="chart"><h3>${UI.esc(ch.title)}</h3>${ch.bars.map(b => `<div class="bar-row">
+        <span class="bl">${UI.esc(b.label)}</span>
+        <span class="bt"><span class="bf" style="width:${Math.round(b.value / max * 100)}%"></span></span>
+        <span class="bv">${UI.fmt.number(b.value, 0)}</span></div>`).join('')}</div>`;
+  }).join('');
+  return UI.print.page({
+    company: p.company, title: d.name || 'Report', ref: period,
+    meta: [`Run by ${d.generatedBy || ''}`],
+    signatures: null,
+    styles: UI.print.docStyles() + `
+      @page{size:A4 landscape;margin:10mm}
+      @media print{body{margin:0}}
+      table.rep{font-size:9.5px}
+      table.rep th,table.rep td{padding:3px 5px}
+      .charts{display:flex;gap:28px;margin-top:16px;page-break-inside:avoid;break-inside:avoid}
+      .chart{flex:1}
+      .chart h3{font-size:11px;margin:0 0 6px}
+      .bar-row{display:flex;align-items:center;gap:8px;font-size:9.5px;margin:2px 0}
+      .bl{width:150px;flex:none;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+      .bt{flex:1;height:9px;background:#EEF1F5}
+      .bf{display:block;height:9px;background:#1F5F3F;-webkit-print-color-adjust:exact;print-color-adjust:exact}
+      .bv{width:32px;text-align:right}
+      .note{font-size:9px;color:#5A6472;margin-top:12px}`,
+    body: table + (charts ? `<div class="charts">${charts}</div>` : '') +
+      (d.note ? `<p class="note">${UI.esc(d.note)}</p>` : '')
+  });
+}
+
 function buildPrintHtml(p) {
   if (p.kind === 'STATEMENTS') return buildStatementsHtml(p);
+  if (p.kind === 'REPORT') return buildReportPrintHtml(p);
   const c = p.company;
   const title = PRINT_TITLES[p.kind] || 'Document';
   const rows = flattenForPrint(p);
