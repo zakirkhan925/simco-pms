@@ -11779,7 +11779,7 @@ async function pageAgreement(root, agreementId) {
   if (d.canEdit) actions.push(`<button class="btn" id="agrEdit">Edit</button>`);
   if (d.canEdit) actions.push(`<button class="btn" id="agrLines">Scope &amp; rates</button>`);
   if (d.canChangeStatus && d.allowedTransitions.length) {
-    actions.push(`<button class="btn" id="agrStatusBtn">Change status</button>`);
+    actions.push(`<button class="btn" id="agrStatusBtn">${a.Status === 'Terminated' ? 'Reopen' : 'Change status'}</button>`);
   }
   // Submitted and decided like a subcontractor bill (owner's decision, 23 Oct 2026).
   if (d.canSubmit) actions.push(`<button class="btn btn-primary" id="agrSubmit">Submit for approval</button>`);
@@ -12017,16 +12017,20 @@ function decideAgreementDialog(agreementId, action) {
 
 
 function agreementStatusDialog(agreementId, allowed) {
+  // A terminated agreement is offered only "Draft": reopening it (administrators, 3 Nov 2026).
+  const reopen = allowed.length === 1 && allowed[0] === 'Draft';
   const fields = [
     { name: 'Status', label: 'New status', type: 'select', required: true, options: allowed },
-    { name: 'Remarks', label: 'Reason / remarks', type: 'textarea', span: 2,
-      hint: 'Required when suspending or terminating' }
+    { name: 'Remarks', label: reopen ? 'Reason for reopening' : 'Reason / remarks', type: 'textarea', span: 2,
+      required: reopen,
+      hint: reopen ? 'It goes back to Draft, to be corrected, submitted and approved again. Not possible once a bill ' +
+        'on it is approved or anything has been paid against it.' : 'Required when suspending or terminating' }
   ];
   const body = UI.el('div');
-  const form = UI.form(fields, {});
+  const form = UI.form(fields, reopen ? { Status: 'Draft' } : {});
   body.appendChild(form);
   UI.modal({
-    title: 'Change agreement status', size: 'narrow', body,
+    title: reopen ? 'Reopen agreement' : 'Change agreement status', size: 'narrow', body,
     footer: [
       { label: 'Cancel', onClick: m => m.close() },
       { label: 'Apply', class: 'btn-primary', onClick: async m => {
