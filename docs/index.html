@@ -13952,7 +13952,7 @@ async function payrollRegister(K, projects) {
   });
 }
 
-function payrollPersonForm(K, projects, row, mates) {
+function payrollPersonForm(K, projects, row, mates, onSaved, defaults) {
   const fields = [
     { name: 'Name', label: 'Name', required: true },
     { name: 'ProjectID', label: 'Project', type: 'select', required: true,
@@ -13980,7 +13980,8 @@ function payrollPersonForm(K, projects, row, mates) {
     { name: 'Status', label: 'Status', type: 'select', options: ['Active', 'Left'] },
     { name: 'Remarks', label: 'Remarks', type: 'textarea', span: 2 });
   const body = UI.el('div');
-  const form = UI.form(fields, row || { ProjectID: payState.project[K.kind] || '', PaymentMode: 'Cash', Status: 'Active' });
+  const form = UI.form(fields, row || Object.assign({ ProjectID: payState.project[K.kind] || '', PaymentMode: 'Cash', Status: 'Active' },
+    defaults || {}));
   body.appendChild(form);
   const mate = form.querySelector('[name="Mate"]');
   if (mate && mates && mates.length) {
@@ -13999,9 +14000,10 @@ function payrollPersonForm(K, projects, row, mates) {
           if (row) data[K.personKey] = row[K.personKey];
           m.busy(true);
           try {
-            UI.success((await api(K.savePerson, data)).message);
+            const res = await api(K.savePerson, data);
+            UI.success(res.message);
             m.close();
-            payrollRegister(K, projects);
+            if (onSaved) onSaved(res.data); else payrollRegister(K, projects);
           } catch (e) { m.busy(false); UI.error('Could not save', e.message); }
         } }
     ]
@@ -14080,27 +14082,28 @@ async function payrollSheetPage(root, K, id) {
       title: 'Each person\'s outstanding advances, up to what he has earned' });
     fill.onclick = () => { lines.forEach(l => { l.AdvanceDeduction = payFill(K, l); touched.delete(l[K.personKey]); payCompute(K, l, s); }); dirty = true; draw(); };
     tools.appendChild(fill);
-    if (d.available.length) {
-      const sel = UI.el('select', { class: 'input', style: 'width:auto;height:30px' });
-      sel.innerHTML = '<option value="">Add someone from the register…</option>' + d.available.map(p =>
-        `<option value="${UI.esc(p[K.personKey])}">${UI.esc(p.Name)}${p.Mate ? ' — ' + UI.esc(p.Mate) : ''}${p.Designation ? ' — ' + UI.esc(p.Designation) : ''}</option>`).join('');
-      sel.onchange = () => {
-        const p = d.available.find(x => x[K.personKey] === sel.value);
-        if (!p) return;
-        const l = Object.assign({}, p, { IsPaid: false });
-        if (K.kind === 'SALARY') l.AttendanceDays = s.DaysInMonth;
-        NUMS.forEach(f => l[f] = Number(l[f]) || 0);
-        payCompute(K, l, s);
-        l.AdvanceDeduction = payFill(K, l);
-        payCompute(K, l, s);
-        lines.push(l);
-        d.available.splice(d.available.indexOf(p), 1);
-        dirty = true; draw();
-        sel.querySelector(`option[value="${CSS.escape(p[K.personKey])}"]`).remove();
-        sel.value = '';
-      };
-      tools.appendChild(sel);
-    }
+    // Add people from the register, or someone new to it (owner's request, 9 Nov 2026).
+    const add = UI.el('button', { class: 'btn btn-sm btn-primary', id: 'psAddPeople', text: '+ Add people' });
+    add.onclick = () => payrollAddPeople(K, d, s, addLine);
+    tools.appendChild(add);
+  }
+  /** Puts a register person on the sheet (not saved until Save or Submit). */
+  function addLine(p) {
+    if (lines.some(x => x[K.personKey] === p[K.personKey])) return;
+    const l = Object.assign({ AdvanceAvailable: 0, AdvanceOutstanding: 0 }, p, { IsPaid: false, Remarks: '' });
+    l.PaymentMode = p.PaymentMode || 'Cash';
+    NUMS.forEach(f => l[f] = Number(l[f]) || 0);
+    if (K.kind === 'SALARY') l.AttendanceDays = s.DaysInMonth;
+    else { l.Days = 0; l.OTHours = 0; }
+    l.AdvanceDeduction = 0; l.OtherDeduction = 0; if (K.kind === 'SALARY') l.TaxAmount = 0;
+    payCompute(K, l, s);
+    l.AdvanceDeduction = payFill(K, l);
+    payCompute(K, l, s);
+    lines.push(l);
+    const i = d.available.findIndex(x => x[K.personKey] === p[K.personKey]);
+    if (i !== -1) d.available.splice(i, 1);
+    dirty = true;
+    draw();
   }
 
   const input = (l, f, w) => `<input class="input" style="width:${w}px;height:30px;padding:4px 6px;text-align:right"
@@ -14193,7 +14196,13 @@ async function payrollSheetPage(root, K, id) {
     empty: UI.emptyState('None', 'Every advance on this project names someone on a register.')
   });
   document.querySelectorAll('[data-link]').forEach(b => {
-    b.onclick = () => payrollLinkAdvance(K, d, d.unlinkedAdvances.find(a => a.StaffAdvanceID === b.dataset.link), id);
+    b.onclick = () => payrollLinkAdvance(K, d, s, d.unlinkedAdvances.find(a => a.StaffAdvanceID === b.dataset.link), id, async person => {
+      // Linked: put him on the sheet if he is not, keep what was typed, and reload with his advance.
+      if (person) addLine(person);
+      if (!d.canEdit) { navigate(K.detail, id); return; }
+      try { await save(); } catch (e) { UI.error('Linked, but the sheet could not be saved', e.message); return; }
+      navigate(K.detail, id);
+    });
   });
   UI.table(document.getElementById('psHistory'), {
     columns: [
@@ -14256,6 +14265,61 @@ async function payrollSheetPage(root, K, id) {
   on('psPayBank', () => payrollPayDialog(K, d, id, 'Bank'));
 }
 
+/**
+ * Everyone on the project's register not yet on the sheet, to tick and add;
+ * or a new person, saved to the register and put on the sheet at once.
+ */
+function payrollAddPeople(K, d, s, addLine) {
+  const who = K.kind === 'LABOUR' ? 'labourer' : 'employee';
+  const body = UI.el('div');
+  const rows = d.available.slice();
+  body.innerHTML = `
+    <p class="muted" style="margin:0 0 10px">Everyone on the ${UI.esc(s.ProjectName)} ${UI.esc(K.registerTitle.toLowerCase())} who is not on
+      this sheet yet. Tick them and press <strong>Add to sheet</strong>. Someone not on the register: press
+      <strong>New ${who}</strong>.</p>
+    ${rows.length ? `<input class="input" id="apSearch" placeholder="Search name, ${K.kind === 'LABOUR' ? 'mate or work' : 'designation'}" style="margin-bottom:8px">
+    <label class="checkbox" style="margin:0 0 6px"><input type="checkbox" id="apAll"> Select all</label>
+    <div id="apList" style="max-height:340px;overflow:auto;border:1px solid var(--border);border-radius:6px"></div>`
+      : `<div class="banner banner-info"><div>Everyone on the register is already on this sheet.</div></div>`}`;
+  const list = () => body.querySelector('#apList');
+  const draw = q => {
+    if (!list()) return;
+    q = (q || '').toLowerCase();
+    list().innerHTML = rows.filter(p => !q || [p.Name, p.Mate, p.Trade, p.Designation, p.CNIC]
+      .some(v => String(v || '').toLowerCase().indexOf(q) !== -1)).map(p => `
+      <label style="display:flex;gap:10px;align-items:center;padding:8px 10px;border-bottom:1px solid var(--border);cursor:pointer">
+        <input type="checkbox" value="${UI.esc(p[K.personKey])}">
+        <span style="flex:1"><strong>${UI.esc(p.Name)}</strong>
+          <span class="muted"> · ${UI.esc(K.kind === 'LABOUR' ? [p.Trade, p.Mate].filter(Boolean).join(' · ') : (p.Designation || ''))}</span></span>
+        <span class="muted">${K.kind === 'LABOUR' ? payNum(p.DailyRate) + ' / day' : payNum(Number(p.BasicSalary) + Number(p.Allowance || 0)) + ' / month'}</span>
+        ${p.AdvanceAvailable ? `<span class="badge badge-amber">owes ${payNum(p.AdvanceAvailable)}</span>` : ''}
+      </label>`).join('') || '<p class="muted" style="padding:10px">Nobody matches.</p>';
+  };
+  draw('');
+  UI.modal({
+    title: 'Add people to ' + (d.sheet[K.sheetKey] || 'the sheet'), body,
+    footer: [
+      { label: 'Cancel', onClick: m => m.close() },
+      { label: 'New ' + who, onClick: m => {
+          m.close();
+          payrollPersonForm(K, [{ ProjectID: s.ProjectID, ProjectName: s.ProjectName, Status: 'Active' }], null, [],
+            p => addLine(p), { ProjectID: s.ProjectID });
+        } },
+      { label: 'Add to sheet', class: 'btn-primary', onClick: m => {
+          const ids = [...body.querySelectorAll('#apList input:checked')].map(c => c.value);
+          if (!ids.length) { UI.warn('Nobody ticked', 'Tick the people to add, or press New ' + who + '.'); return; }
+          ids.forEach(id => { const p = rows.find(x => x[K.personKey] === id); if (p) addLine(p); });
+          m.close();
+          UI.success(ids.length + (ids.length === 1 ? ' person' : ' people') + ' added', 'Enter their figures, then Save.');
+        } }
+    ]
+  });
+  const search = body.querySelector('#apSearch');
+  if (search) search.oninput = () => draw(search.value);
+  const all = body.querySelector('#apAll');
+  if (all) all.onchange = () => body.querySelectorAll('#apList input').forEach(c => { c.checked = all.checked; });
+}
+
 function payrollPayDialog(K, d, id, mode) {
   const amount = mode === 'Cash' ? d.unpaidCash : d.unpaidBank;
   const fields = mode === 'Cash'
@@ -14286,21 +14350,46 @@ function payrollPayDialog(K, d, id, mode) {
   });
 }
 
-function payrollLinkAdvance(K, d, adv, id) {
-  const people = d.lines.concat(d.available).map(p => ({ value: p[K.personKey], label: p.Name + ' (' + p[K.personKey] + ')' }));
-  const fields = [{ name: 'PersonID', label: `${adv.PersonName}'s ${cash(adv.Outstanding)} is owed by`, type: 'select', required: true,
+/**
+ * Ties an advance that names nobody on the register to a person: someone on
+ * the register, or someone new, added to the register there and then.
+ */
+function payrollLinkAdvance(K, d, s, adv, id, after) {
+  const who = K.kind === 'LABOUR' ? 'labourer' : 'employee';
+  const everyone = d.lines.concat(d.available);
+  // The likeliest match first: the same name as on the advance.
+  const guess = everyone.find(p => String(p.Name).trim().toLowerCase() === String(adv.PersonName).trim().toLowerCase());
+  const people = [{ value: '', label: 'Choose from the register…' }]
+    .concat(everyone.map(p => ({ value: p[K.personKey], label: p.Name + ' (' + p[K.personKey] + ')' })));
+  const fields = [{ name: 'PersonID', label: `${adv.PersonName}'s ${cash(adv.Outstanding)} is owed by`, type: 'select',
                     span: 2, options: people }];
-  const form = UI.form(fields, {});
-  UI.modal({ title: 'Whose advance is ' + adv.StaffAdvanceID + '?', body: form, footer: [
+  const body = UI.el('div');
+  const form = UI.form(fields, { PersonID: guess ? guess[K.personKey] : '' });
+  body.appendChild(form);
+  body.appendChild(UI.el('p', { class: 'muted', style: 'margin:8px 0 0',
+    text: `Not on the register? Press "New ${who}": he is added to the register with this name, the advance is linked to him, ` +
+          'and he is put on this sheet.' }));
+  const link = async personId => {
+    UI.success((await api('linkStaffAdvance', adv.StaffAdvanceID, { PersonType: K.personType, PersonID: personId })).message);
+  };
+  UI.modal({ title: 'Whose advance is ' + adv.StaffAdvanceID + '?', body, footer: [
     { label: 'Cancel', onClick: m => m.close() },
+    { label: 'New ' + who, onClick: m => {
+        m.close();
+        payrollPersonForm(K, [{ ProjectID: s.ProjectID, ProjectName: s.ProjectName, Status: 'Active' }], null, [],
+          async person => {
+            try { await link(person[K.personKey]); } catch (e) { UI.error('Added to the register, but the advance could not be linked', e.message); return; }
+            await after(person);
+          }, { ProjectID: s.ProjectID, Name: adv.PersonName });
+      } },
     { label: 'Link', class: 'btn-primary', onClick: async m => {
         const v = UI.validate(form, fields);
         if (!v) return;
+        if (!v.PersonID) { UI.setFieldError(form, 'PersonID', 'Choose who took it, or press New ' + who); return; }
         m.busy(true);
-        try {
-          UI.success((await api('linkStaffAdvance', adv.StaffAdvanceID, { PersonType: K.personType, PersonID: v.PersonID })).message);
-          m.close(); navigate(K.detail, id);
-        } catch (e) { m.busy(false); UI.error('Could not link it', e.message); }
+        try { await link(v.PersonID); } catch (e) { m.busy(false); UI.error('Could not link it', e.message); return; }
+        m.close();
+        await after(d.available.find(p => p[K.personKey] === v.PersonID) || null);
       } }
   ] });
 }
