@@ -3670,7 +3670,7 @@ async function renderOverviewBudget(projectId, sym) {
   const host = document.getElementById('ovBudgetSection');
   if (!host || !can('budget.view')) return;
   let data;
-  try { data = (await api('listBudget', projectId, {})).data; }
+  try { data = (await api('listBudget', projectId, { pageSize: 1000 })).data; }
   catch (e) { return; }
   const rows = data.rows || [];
   const loose = data.unbudgetedCosts || [];
@@ -4278,19 +4278,43 @@ function openBOQForm(projectId, existing, sym) {
 
 /* ------------------------------------------------------------ BUDGET TAB */
 
+// Search, filters and paging, as on the BOQ (owner's request, 9 Nov 2026).
+const budgetState = { page: 1, pageSize: 50, search: '', category: '', show: '' };
+
 async function renderProjectBudget(host, d, sym) {
   const projectId = d.project.ProjectID;
   host.innerHTML = `
     <div class="card">
       <div class="card-head">
-        <div class="card-title">Budget by cost code</div>
+        <div class="filters">
+          <div class="field"><label for="budgetSearch">Search</label>
+            <input class="input" id="budgetSearch" placeholder="Cost code, description or material"
+              value="${UI.esc(budgetState.search)}"></div>
+          <div class="field"><label for="budgetCategory">Category</label><select class="input" id="budgetCategory"></select></div>
+          <div class="field"><label for="budgetShow">Show</label><select class="input" id="budgetShow"></select></div>
+        </div>
         <div class="flex gap-8" id="budgetActions"></div>
       </div>
       <div id="budgetTotals"></div>
       <div id="budgetTable">${UI.loadingState()}</div>
+      <div id="budgetPager"></div>
       <div id="budgetExtras"></div>
     </div>`;
+  let debounce;
+  document.getElementById('budgetSearch').oninput = e => {
+    clearTimeout(debounce);
+    debounce = setTimeout(() => { budgetState.search = e.target.value; budgetState.page = 1; loadBudget(projectId, sym); }, 250);
+  };
   await loadBudget(projectId, sym);
+}
+
+/** The filter state as the server reads it. */
+function budgetQuery() {
+  const q = { page: budgetState.page, pageSize: budgetState.pageSize, search: budgetState.search,
+              category: budgetState.category };
+  if (budgetState.show === 'overbudget') q.overBudgetOnly = true;
+  else if (budgetState.show) q.qtyStatus = budgetState.show;
+  return q;
 }
 
 async function loadBudget(projectId, sym) {
@@ -4298,8 +4322,29 @@ async function loadBudget(projectId, sym) {
   if (!mount) return;
   mount.innerHTML = UI.loadingState();
   try {
-    const res = await api('listBudget', projectId, {});
+    const res = await api('listBudget', projectId, budgetQuery());
     const d = res.data;
+
+    const cat = document.getElementById('budgetCategory');
+    if (cat && !cat.dataset.filled) {
+      cat.dataset.filled = '1';
+      cat.innerHTML = '<option value="">All categories</option>' +
+        (d.categories || []).map(c => `<option value="${UI.esc(c)}">${UI.esc(c)}</option>`).join('');
+      cat.value = budgetState.category;
+      cat.onchange = e => { budgetState.category = e.target.value; budgetState.page = 1; loadBudget(projectId, sym); };
+    }
+    const show = document.getElementById('budgetShow');
+    if (show && !show.dataset.filled) {
+      show.dataset.filled = '1';
+      // A server older than 9 Nov 2026 sends no quantity counts and ignores these filters.
+      const qtyFilters = d.quantityTracking && d.totals && d.totals.quantity;
+      const opts = [['', 'All lines']].concat(qtyFilters ? [['tobuy', 'Still to buy'], ['full', 'Fully purchased'],
+        ['over', 'Bought over requirement'], ['due', 'Awaiting delivery'], ['tracked', 'Tracked by quantity'],
+        ['untracked', 'Not tracked by quantity']] : []).concat([['overbudget', 'Over budget (cost)']]);
+      show.innerHTML = opts.map(o => `<option value="${o[0]}">${UI.esc(o[1])}</option>`).join('');
+      show.value = budgetState.show;
+      show.onchange = e => { budgetState.show = e.target.value; budgetState.page = 1; loadBudget(projectId, sym); };
+    }
 
     const actions = document.getElementById('budgetActions');
     if (actions && !actions.dataset.filled) {
@@ -4334,14 +4379,18 @@ async function loadBudget(projectId, sym) {
     const mode = d.quantityTracking ? budgetView() : 'cost';
     const showCost = mode !== 'qty', showQty = mode !== 'cost';
     if (!showCost) {
-      const tracked = d.rows.filter(r => r.BudgetQty !== null && r.BudgetQty !== undefined);
+      // Counted by the server over every line the filters leave, not just this page.
+      const tr = d.rows.filter(r => r.BudgetQty !== null && r.BudgetQty !== undefined);
+      const qt = t.quantity || { tracked: tr.length, full: tr.filter(r => r.ToBuyQty === 0).length,
+        tobuy: tr.filter(r => r.ToBuyQty > 0).length, over: tr.filter(r => r.OverBoughtQty > 0).length,
+        due: d.rows.filter(r => r.ToReceiveQty > 0).length };
       document.getElementById('budgetTotals').innerHTML = `
         <div class="stat-grid" style="padding:16px 16px 0">
-          ${[['Tracked by quantity', String(tracked.length), `of ${d.rows.length} line(s)`],
-             ['Fully purchased', String(tracked.filter(r => r.ToBuyQty === 0).length), 'nothing left to buy'],
-             ['Still to buy', String(tracked.filter(r => r.ToBuyQty > 0).length), 'line(s) short of requirement'],
-             ['Bought over requirement', String(tracked.filter(r => r.OverBoughtQty > 0).length), 'line(s)'],
-             ['Awaiting delivery', String(d.rows.filter(r => r.ToReceiveQty > 0).length), 'line(s) with quantity due']]
+          ${[['Tracked by quantity', String(qt.tracked || 0), `of ${t.lines} line(s)`],
+             ['Fully purchased', String(qt.full || 0), 'nothing left to buy'],
+             ['Still to buy', String(qt.tobuy || 0), 'line(s) short of requirement'],
+             ['Bought over requirement', String(qt.over || 0), 'line(s)'],
+             ['Awaiting delivery', String(qt.due || 0), 'line(s) with quantity due']]
             .map(x => `<div class="stat"><div class="stat-label">${UI.esc(x[0])}</div>
               <div class="stat-value">${UI.esc(x[1])}</div><div class="stat-note">${UI.esc(x[2])}</div>
               <div class="stat-accent"></div></div>`).join('')}
@@ -4392,7 +4441,13 @@ async function loadBudget(projectId, sym) {
              <button class="btn btn-sm btn-danger" data-del="${UI.esc(r.BudgetID)}">Delete</button></div>` }] : [])
       ]),
       rows: d.rows,
-      empty: UI.emptyState('No budget lines', 'Add cost codes, or import the budget from a CSV.')
+      empty: UI.emptyState(budgetState.search || budgetState.category || budgetState.show ? 'Nothing matches'
+        : 'No budget lines', budgetState.search || budgetState.category || budgetState.show
+        ? 'Clear the search or a filter to see more lines.' : 'Add cost codes, or import the budget from a CSV.')
+    });
+    UI.pager(document.getElementById('budgetPager'), {
+      page: d.page, totalPages: d.totalPages, total: d.total, pageSize: d.pageSize,
+      onPage: p => { budgetState.page = p; loadBudget(projectId, sym); }
     });
 
     mount.querySelectorAll('[data-edit]').forEach(b => {
