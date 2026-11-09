@@ -29,7 +29,8 @@
     10: { name: 'Reports and Management Dashboard', done: true },
     11: { name: 'Bulk Import / Export, Templates and Documents', done: true },
     12: { name: 'Audit, Notifications, Security, Performance hardening', done: true },
-    13: { name: 'Working cash advances and site imprest', done: true }
+    13: { name: 'Working cash advances and site imprest', done: true },
+    14: { name: 'Labour and salaries', done: true }
   };
 
   /**
@@ -67,6 +68,8 @@
     'cash-account': 'cash',
     'cash-reports': 'cash',
     'cash-report': 'cash',
+    'labour-sheet': 'labour',
+    'salary-sheet': 'salaries',
     report: 'reports',
     profile: null
   };

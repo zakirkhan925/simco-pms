@@ -1494,6 +1494,11 @@ const NAV = [
     { id: 'documents',      label: 'Documents',      icon: '❑', phase: 11, perm: 'project.view' },
     { id: 'reports',        label: 'Reports',        icon: '◳', phase: 10, perm: 'report.view' }
   ]},
+  // Labour and salaries, each its own module (owner's request, 9 Nov 2026).
+  { group: 'Labour & Salaries', items: [
+    { id: 'labour',   label: 'Labour',   icon: '☷', phase: 14, perm: 'labour.view' },
+    { id: 'salaries', label: 'Salaries', icon: '◷', phase: 14, perm: 'salary.view' }
+  ]},
   { group: 'Administration', items: [
     { id: 'users',    label: 'Users',              icon: '◕', phase: 1, perm: 'user.view' },
     { id: 'roles',    label: 'Roles & Permissions',icon: '⚿', phase: 1, perm: 'user.view' },
@@ -1884,7 +1889,9 @@ async function doLogout() {
  */
 const ROUTE_PARENTS = {
   project: 'projects',
-  vendor: 'vendors'
+  vendor: 'vendors',
+  'labour-sheet': 'labour',
+  'salary-sheet': 'salaries'
 };
 
 const PAGES = {
@@ -1920,7 +1927,7 @@ const ROUTE_SOURCE = {
   'stock': 'Stock.html', 'stock-items': 'Stock.html', 'goods-receipts': 'Stock.html', 'goods-returns': 'Stock.html',
   'material-issues': 'Stock.html', 'transfers': 'Stock.html',
   'rar': 'Billing.html', 'expenses': 'Costs.html', 'subcontractors': 'Costs.html',
-  'cash': 'Treasury.html', 'documents': 'Data.html', 'reports': 'Insights.html',
+  'cash': 'Treasury.html', 'labour': 'Payroll.html', 'salaries': 'Payroll.html', 'documents': 'Data.html', 'reports': 'Insights.html',
   'management': 'Insights.html', 'notifications': 'Alerts.html',
   'import-export': 'Data.html'
 };
@@ -12915,7 +12922,8 @@ ROUTE_PARENTS['payables'] = 'subcontractors';
 const CASH_TYPE_LABEL = {
   OPENING: 'Opening balance', ISSUE: 'Cash issued', EXPENSE: 'Expense',
   SUBPAYMENT: 'Subcontractor payment', SUBADVANCE: 'Advance to subcontractor',
-  STAFF_ADVANCE: 'Advance to staff',
+  STAFF_ADVANCE: 'Advance to labour / employee', VENDOR_ADVANCE: 'Advance to vendor',
+  PAYROLL: 'Labour / salary paid', PAYMENT_REVERSAL: 'Payment reversed',
   ADVANCE_RECOVERY: 'Advance recovered', RETURN: 'Returned to office',
   TRANSFER_IN: 'Transfer in', TRANSFER_OUT: 'Transfer out', ADJUSTMENT: 'Adjustment'
 };
@@ -13142,9 +13150,11 @@ async function pageCashAccount(root, accountId) {
 
   UI.table(document.getElementById('cashAdvances'), {
     columns: [
-      { key: 'PersonName', label: 'Person' },
+      { key: 'PersonName', label: 'Person', render: r => UI.esc(r.PersonName) +
+          (r.PersonType ? ` <span class="muted">· ${UI.esc(r.PersonType)}</span>` : '') },
       { key: 'Amount', label: 'Advanced', align: 'right', render: r => cash(r.Amount) },
-      { key: 'Recovered', label: 'Recovered', align: 'right', render: r => cash(r.Recovered) },
+      { key: 'Recovered', label: 'Recovered', align: 'right', render: r => cash(r.Recovered) +
+          (r.Deducted ? `<div class="muted" style="font-size:11px">${cash(r.Deducted)} off pay</div>` : '') },
       { key: 'Outstanding', label: 'Outstanding', align: 'right',
         render: r => r.Outstanding ? `<strong>${cash(r.Outstanding)}</strong>` : cash(0) },
       { key: 'Status', label: 'Status', width: '95px',
@@ -13203,10 +13213,13 @@ async function cashSpendDialog(accountId, d) {
 
   // Cash goes to subcontractors before there is a bill, so the firm is picked
   // directly. Agreements are offered per firm, and only this project's.
-  const [subRes, agrRes] = await Promise.all([
+  const [subRes, agrRes, vndRes] = await Promise.all([
     api('listSubcontractors', { pageSize: 300 }),
-    api('listAgreements', { pageSize: 300 })
+    api('listAgreements', { pageSize: 300 }),
+    // Vendors for an advance before the invoice (owner's request, 9 Nov 2026).
+    api('listVendors', { pageSize: 1000, includeStats: false }).catch(() => ({ data: { rows: [] } }))
   ]);
+  const vendors = vndRes.data.rows.filter(v => String(v.Status) !== 'Blacklisted');
   const subs = subRes.data.rows.filter(x => String(x.Status) !== 'Blacklisted');
   const projectAgreements = agrRes.data.rows
     .filter(a => String(a.ProjectID) === String(d.account.ProjectID));
@@ -13217,7 +13230,8 @@ async function cashSpendDialog(accountId, d) {
         { value: 'EXPENSE', label: 'Site expense' },
         { value: 'SUBPAYMENT', label: 'Payment against a subcontractor bill' },
         { value: 'SUBADVANCE', label: 'Advance to a subcontractor (no bill yet)' },
-        { value: 'STAFF_ADVANCE', label: 'Advance to labour or staff' },
+        { value: 'VENDOR_ADVANCE', label: 'Advance to a vendor (no invoice yet)' },
+        { value: 'STAFF_ADVANCE', label: 'Advance to labour or an employee' },
         { value: 'ADVANCE_RECOVERY', label: 'Advance settled or returned' },
         { value: 'RETURN', label: 'Cash returned to the office' }
       ] },
@@ -13239,11 +13253,23 @@ async function cashSpendDialog(accountId, d) {
       options: [],
       hint: 'Optional. Leave blank if the agreement is not signed yet — ' +
             'you can attach it later from the subcontractor.' },
+    { name: 'VendorID', label: 'Vendor', type: 'select',
+      options: [{ value: '', label: 'Choose the vendor…' }].concat(vendors.map(v => ({ value: v.VendorID, label: v.CompanyName }))),
+      hint: vendors.length ? 'Shows on his ledger as paid; his next invoice is settled against it'
+        : 'No vendor to choose: none on file, or your role cannot view vendors' },
+    { name: 'POID', label: 'Against purchase order', type: 'select', options: [],
+      hint: 'Optional' },
     { name: 'StaffAdvanceID', label: 'Advance being settled', type: 'select',
       options: advances.map(a => ({ value: a.StaffAdvanceID,
-        label: a.PersonName + ' — ' + cash(a.Outstanding) + ' outstanding' })),
+        label: a.PersonName + (a.PersonType ? ' (' + a.PersonType.toLowerCase() + ')' : '') + ' — ' +
+               cash(a.Outstanding) + ' outstanding' })),
       hint: advances.length ? '' : 'Nothing outstanding' },
-    { name: 'PersonName', label: 'Person receiving it' },
+    // Labour or employee, always (owner's request, 9 Nov 2026): the labour and
+    // salary sheets deduct the advance when it names someone on their register.
+    { name: 'PersonType', label: 'Advance to', type: 'select',
+      options: [{ value: '', label: 'Labour or employee?' }, { value: 'Labour', label: 'Labour' }, { value: 'Employee', label: 'Employee' }] },
+    { name: 'PersonID', label: 'Who', type: 'select', options: [] },
+    { name: 'PersonName', label: 'Person receiving it', hint: 'Not on the register: type the name. Link it to him later from his sheet.' },
     { name: 'PayeeName', label: 'Paid to', placeholder: 'Shop, driver, supplier…' },
     { name: 'Description', label: 'What was it for?', type: 'textarea', span: 2 }
   ];
@@ -13257,7 +13283,8 @@ async function cashSpendDialog(accountId, d) {
     EXPENSE:          ['Category', 'CostCode', 'PayeeName', 'Description'],
     SUBPAYMENT:       ['SubBillID', 'Description'],
     SUBADVANCE:       ['SubcontractorID', 'AgreementID', 'Description'],
-    STAFF_ADVANCE:    ['PersonName', 'Description'],
+    VENDOR_ADVANCE:   ['VendorID', 'POID', 'Description'],
+    STAFF_ADVANCE:    ['PersonType', 'PersonID', 'PersonName', 'Description'],
     ADVANCE_RECOVERY: ['StaffAdvanceID', 'Description'],
     RETURN:           ['Description']
   };
@@ -13265,14 +13292,57 @@ async function cashSpendDialog(accountId, d) {
   const applyType = () => {
     const show = SHOW[typeField.value] || [];
     ['Category', 'CostCode', 'SubBillID', 'SubcontractorID', 'AgreementID', 'StaffAdvanceID',
-     'PersonName', 'PayeeName', 'Description']
+     'VendorID', 'POID', 'PersonType', 'PersonID', 'PersonName', 'PayeeName', 'Description']
       .forEach(n => {
         const el = form.querySelector('[name="' + n + '"]');
         if (!el) return;
         const row = el.closest('.field') || el.parentElement;
         if (row) row.style.display = show.indexOf(n) === -1 ? 'none' : '';
       });
+    if (typeField.value === 'STAFF_ADVANCE') applyPersonId();
   };
+
+  // The register's names for the chosen kind; a name typed only when he is not on it.
+  const ptField = form.querySelector('[name="PersonType"]');
+  const pidField = form.querySelector('[name="PersonID"]');
+  const pnRow = () => { const el = form.querySelector('[name="PersonName"]'); return el.closest('.field') || el.parentElement; };
+  const applyPersonId = () => {
+    if (typeField.value !== 'STAFF_ADVANCE') return;
+    pnRow().style.display = pidField.value ? 'none' : '';
+  };
+  const peopleCache = {};
+  const loadPeople = async () => {
+    const t = ptField.value;
+    pidField.innerHTML = '<option value="">' + (t ? 'Not on the register' : 'Choose labour or employee first') + '</option>';
+    if (t) {
+      if (!peopleCache[t]) {
+        try { peopleCache[t] = (await api('listPayrollPeople', d.account.ProjectID, t)).data; }
+        catch (e) { peopleCache[t] = []; }
+      }
+      pidField.innerHTML += peopleCache[t].map(p => `<option value="${UI.esc(p.PersonID)}">` +
+        UI.esc(p.Name + (p.Detail ? ' — ' + p.Detail : '')) + '</option>').join('');
+    }
+    applyPersonId();
+  };
+  ptField.onchange = loadPeople;
+  pidField.onchange = applyPersonId;
+  loadPeople();
+
+  // A vendor's open orders on this project, for an advance against one.
+  const vField = form.querySelector('[name="VendorID"]');
+  const poField = form.querySelector('[name="POID"]');
+  let projectPOs = null;
+  const applyVendor = async () => {
+    poField.innerHTML = '<option value="">Not against an order</option>';
+    if (!vField.value) return;
+    if (projectPOs === null) {
+      try { projectPOs = (await api('listPurchaseOrders', { projectId: d.account.ProjectID, pageSize: 500, hideCancelled: true })).data.rows; }
+      catch (e) { projectPOs = []; }
+    }
+    poField.innerHTML += projectPOs.filter(o => String(o.VendorID) === String(vField.value) && o.Status !== 'Cancelled')
+      .map(o => `<option value="${UI.esc(o.POID)}">${UI.esc(o.POID + ' — ' + o.Status)}</option>`).join('');
+  };
+  vField.onchange = applyVendor;
   typeField.onchange = applyType;
   applyType();
 
@@ -13300,6 +13370,15 @@ async function cashSpendDialog(accountId, d) {
           const data = UI.validate(form, fields.filter(f => shown.indexOf(f.name) !== -1));
           if (!data) return;
           data.Type = typeField.value;
+          if (data.Type === 'STAFF_ADVANCE' && !data.PersonType) {
+            UI.setFieldError(form, 'PersonType', 'Say whether it is labour or an employee'); return;
+          }
+          if (data.Type === 'STAFF_ADVANCE' && !data.PersonID && !String(data.PersonName || '').trim()) {
+            UI.setFieldError(form, 'PersonName', 'Choose him from the register, or type his name'); return;
+          }
+          if (data.Type === 'VENDOR_ADVANCE' && !data.VendorID) {
+            UI.setFieldError(form, 'VendorID', 'Choose the vendor'); return;
+          }
           m.busy(true);
           try {
             UI.success((await api('recordCashSpend', accountId, data)).message);
@@ -13653,6 +13732,618 @@ PAGES['cash-account'] = pageCashAccount;
 PAGES['cash-reports'] = pageCashReports;
 PAGES['cash-report'] = pageCashReport;
 
+</script>
+
+  <script>
+/* ==========================================================================
+ * Labour and Salaries (owner's request, 9 Nov 2026) — two modules on one
+ * screen engine: a register, and the monthly sheet that replaces the paper
+ * Labour Work Calculation Sheet and the salary sheet. Prepared, checked,
+ * approved; advances deducted on approval; paid in cash from a float or by
+ * bank.
+ * ======================================================================== */
+
+const PAYROLL = {
+  labour: {
+    kind: 'LABOUR', route: 'labour', detail: 'labour-sheet', title: 'Labour', perm: 'labour',
+    sub: 'Labour register and the monthly labour work calculation sheet',
+    noun: 'Labour sheet', registerTitle: 'Labour register', person: 'labourer',
+    listPeople: 'listLabour', savePerson: 'saveLabour', personKey: 'LabourID',
+    listSheets: 'listLabourSheets', getSheet: 'getLabourSheet', createSheet: 'createLabourSheet',
+    saveSheet: 'saveLabourSheet', action: 'labourSheetAction', pay: 'payLabourSheet',
+    sheetKey: 'LabourSheetID', lineKey: 'LabourLineID', personType: 'Labour',
+    signatures: ['Prepared by', 'Checked by', 'Approved by (CEO / MD)']
+  },
+  salary: {
+    kind: 'SALARY', route: 'salaries', detail: 'salary-sheet', title: 'Salaries', perm: 'salary',
+    sub: 'Employee register and the monthly salary sheet',
+    noun: 'Salary sheet', registerTitle: 'Employee register', person: 'employee',
+    listPeople: 'listEmployees', savePerson: 'saveEmployee', personKey: 'EmployeeID',
+    listSheets: 'listSalarySheets', getSheet: 'getSalarySheet', createSheet: 'createSalarySheet',
+    saveSheet: 'saveSalarySheet', action: 'salarySheetAction', pay: 'paySalarySheet',
+    sheetKey: 'SalarySheetID', lineKey: 'SalaryLineID', personType: 'Employee',
+    signatures: ['Accounts Officer', 'Chief Accountant', 'Project Manager']
+  }
+};
+const PAYROLL_TONE = { Draft: 'muted', Submitted: 'info', Checked: 'info', Approved: 'good',
+                       'Partially Paid': 'warn', Paid: 'good', Returned: 'warn', Cancelled: 'muted' };
+const payRound = n => Math.round((Number(n) || 0) * 100 + Number.EPSILON * 100) / 100;
+const payNum = n => UI.fmt.number(n, 2);
+const payState = { tab: {}, project: {}, status: {} };
+
+function thisMonth() {
+  const d = new Date();
+  return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0');
+}
+
+/* ---------------------------------------------------------- MODULE HOME */
+
+async function payrollHome(root, K) {
+  const tab = payState.tab[K.kind] || 'sheets';
+  root.innerHTML = pageHead(K.title, K.sub, `<button class="btn btn-primary hidden" id="payNewBtn"></button>`) +
+    `<div class="tabs" id="payTabs"></div>
+     <div class="card">
+       <div class="card-head"><div class="filters" id="payFilters"></div></div>
+       <div class="stat-grid hidden" id="payTotals" style="padding:16px 16px 0"></div>
+       <div id="payBody">${UI.loadingState()}</div>
+     </div>`;
+  const tabs = document.getElementById('payTabs');
+  [['sheets', 'Monthly sheets'], ['register', K.registerTitle]].forEach(([id, label]) => {
+    const b = UI.el('button', { class: 'tab' + (id === tab ? ' active' : ''), text: label });
+    b.onclick = () => { payState.tab[K.kind] = id; payrollHome(root, K); };
+    tabs.appendChild(b);
+  });
+
+  let projects = [];
+  try { projects = (await api('listProjects', { pageSize: 300 })).data.rows; } catch (e) { projects = []; }
+  const filters = document.getElementById('payFilters');
+  const projOpts = '<option value="">All my projects</option>' + projects.map(p =>
+    `<option value="${UI.esc(p.ProjectID)}">${UI.esc(p.ProjectName)}</option>`).join('');
+  filters.innerHTML = `
+    <div class="field"><label for="payProject">Project</label><select class="input" id="payProject">${projOpts}</select></div>
+    ${tab === 'sheets'
+      ? `<div class="field"><label for="payStatus">Status</label><select class="input" id="payStatus">
+           <option value="">All</option>${Object.keys(PAYROLL_TONE).map(s => `<option>${s}</option>`).join('')}</select></div>`
+      : `<div class="field"><label for="paySearch">Search</label>
+           <input class="input" id="paySearch" placeholder="Name, CNIC${K.kind === 'LABOUR' ? ', mate or trade' : ' or designation'}"></div>
+         <div class="field"><label for="payPStatus">Status</label><select class="input" id="payPStatus">
+           <option value="">All</option><option>Active</option><option>Left</option></select></div>`}`;
+  const proj = document.getElementById('payProject');
+  proj.value = payState.project[K.kind] || '';
+  proj.onchange = () => { payState.project[K.kind] = proj.value; load(); };
+
+  const load = tab === 'sheets' ? () => payrollSheetsList(K, projects) : () => payrollRegister(K, projects);
+  if (tab === 'sheets') {
+    const st = document.getElementById('payStatus');
+    st.value = payState.status[K.kind] || '';
+    st.onchange = () => { payState.status[K.kind] = st.value; load(); };
+  } else {
+    let t;
+    document.getElementById('paySearch').oninput = () => { clearTimeout(t); t = setTimeout(load, 250); };
+    document.getElementById('payPStatus').onchange = load;
+  }
+  await load();
+}
+
+async function payrollSheetsList(K, projects) {
+  const host = document.getElementById('payBody');
+  host.innerHTML = UI.loadingState();
+  let d;
+  try {
+    d = (await api(K.listSheets, { projectId: payState.project[K.kind] || '', status: payState.status[K.kind] || '' })).data;
+  } catch (e) { host.innerHTML = UI.errorState(e.message); return; }
+  const nb = document.getElementById('payNewBtn');
+  nb.textContent = '+ New ' + K.noun.toLowerCase();
+  nb.classList.toggle('hidden', !d.canCreate);
+  nb.onclick = () => payrollNewSheet(K, projects);
+  const tiles = document.getElementById('payTotals');
+  tiles.classList.remove('hidden');
+  tiles.innerHTML = statTile('Sheets', String(d.totals.sheets), 'not cancelled') +
+    statTile('Awaiting a decision', String(d.totals.awaiting), 'submitted or checked') +
+    statTile('Approved, not yet paid', cash(d.totals.unpaid), 'net still to pay');
+  UI.table(host, {
+    columns: [
+      { key: K.sheetKey, label: 'Sheet', width: '100px',
+        render: r => `<a href="#" class="link" data-sheet="${UI.esc(r[K.sheetKey])}">${UI.esc(r[K.sheetKey])}</a>` },
+      { key: 'Month', label: 'Month', width: '90px', render: r => UI.esc(r.MonthLabel) },
+      { key: 'ProjectName', label: 'Project' },
+      { key: 'People', label: 'People', align: 'right' },
+      { key: 'Gross', label: 'Gross', align: 'right', render: r => cash(K.kind === 'LABOUR' ? r.TotalGross : r.GrossAmount) },
+      { key: 'Deductions', label: 'Deductions', align: 'right',
+        render: r => cash(payRound(r.AdvanceDeduction + r.OtherDeduction + (r.TaxAmount || 0))) },
+      { key: 'NetAmount', label: 'Net', align: 'right', render: r => `<strong>${cash(r.NetAmount)}</strong>` },
+      { key: 'PaidAmount', label: 'Paid', align: 'right', render: r => cash(r.PaidAmount) },
+      { key: 'Status', label: 'Status', width: '115px', render: r => UI.badge(r.Status, PAYROLL_TONE[r.Status]) }
+    ],
+    rows: d.rows,
+    empty: UI.emptyState('No sheets yet', d.canCreate
+      ? 'Draw up the month\'s sheet: everyone on the register is put on it.' : 'None has been drawn up on your projects.')
+  });
+  host.querySelectorAll('[data-sheet]').forEach(a => {
+    a.onclick = e => { e.preventDefault(); navigate(K.detail, a.dataset.sheet); };
+  });
+}
+
+function payrollNewSheet(K, projects) {
+  const fields = [
+    { name: 'ProjectID', label: 'Project', type: 'select', required: true,
+      options: projects.filter(p => p.Status !== 'Closed').map(p => ({ value: p.ProjectID, label: p.ProjectName })) },
+    { name: 'Month', label: 'Month', type: 'month', required: true, value: thisMonth() },
+    { name: 'Remarks', label: 'Remarks', type: 'textarea', span: 2 }
+  ];
+  const body = UI.el('div');
+  body.appendChild(UI.el('p', { class: 'muted', style: 'margin:0 0 12px',
+    text: 'Everyone active on the project\'s ' + K.registerTitle.toLowerCase() + ' is put on the sheet, at the register\'s ' +
+      (K.kind === 'LABOUR' ? 'daily rates, with no days yet.' : 'salaries, at full attendance.') +
+      ' Outstanding advances are filled in as deductions; you can lower them.' }));
+  const form = UI.form(fields, { ProjectID: payState.project[K.kind] || '' });
+  body.appendChild(form);
+  UI.modal({
+    title: 'New ' + K.noun.toLowerCase(), body,
+    footer: [
+      { label: 'Cancel', onClick: m => m.close() },
+      { label: 'Draw up', class: 'btn-primary', onClick: async m => {
+          const data = UI.validate(form, fields);
+          if (!data) return;
+          m.busy(true);
+          try {
+            const r = await api(K.createSheet, data);
+            UI.success(r.message);
+            m.close();
+            navigate(K.detail, r.data.id);
+          } catch (e) { m.busy(false); UI.error('Could not draw it up', e.message); }
+        } }
+    ]
+  });
+}
+
+/* ------------------------------------------------------------- REGISTER */
+
+async function payrollRegister(K, projects) {
+  const host = document.getElementById('payBody');
+  host.innerHTML = UI.loadingState();
+  let d;
+  try {
+    d = (await api(K.listPeople, {
+      projectId: payState.project[K.kind] || '', search: document.getElementById('paySearch').value,
+      status: document.getElementById('payPStatus').value
+    })).data;
+  } catch (e) { host.innerHTML = UI.errorState(e.message); return; }
+  const nb = document.getElementById('payNewBtn');
+  nb.textContent = '+ Add ' + K.person;
+  nb.classList.toggle('hidden', !d.canManage);
+  nb.onclick = () => payrollPersonForm(K, projects, null, d.mates);
+  const tiles = document.getElementById('payTotals');
+  tiles.classList.remove('hidden');
+  tiles.innerHTML = statTile('On the register', String(d.totals.people), d.totals.active + ' active') +
+    statTile('Advances outstanding', cash(d.totals.advances), 'deducted when a sheet is approved');
+  const cols = [
+    { key: K.personKey, label: 'ID', width: '95px' },
+    { key: 'Name', label: 'Name', render: r => `<strong>${UI.esc(r.Name)}</strong>` +
+        (r.CNIC ? `<br><span class="muted" style="font-size:12px">${UI.esc(r.CNIC)}</span>` : '') }
+  ];
+  if (K.kind === 'LABOUR') {
+    cols.push({ key: 'Mate', label: 'Mate' }, { key: 'Trade', label: 'Work',
+                render: r => UI.esc(r.Trade || '') + (r.SkillLevel ? ` <span class="muted">· ${UI.esc(r.SkillLevel)}</span>` : '') },
+              { key: 'DailyRate', label: 'Rate / day', align: 'right', render: r => payNum(r.DailyRate) });
+  } else {
+    cols.push({ key: 'Designation', label: 'Designation' },
+              { key: 'BasicSalary', label: 'Basic', align: 'right', render: r => payNum(r.BasicSalary) },
+              { key: 'Allowance', label: 'Food + other', align: 'right', render: r => r.Allowance ? payNum(r.Allowance) : '–' },
+              { key: 'MonthlyTotal', label: 'Monthly', align: 'right', render: r => `<strong>${payNum(r.MonthlyTotal)}</strong>` });
+  }
+  cols.push(
+    { key: 'ProjectName', label: 'Project' },
+    { key: 'PaymentMode', label: 'Paid by', render: r => UI.esc(r.PaymentMode || 'Cash') +
+        (r.PaymentMode === 'Bank' && r.BankAccount ? `<br><span class="muted" style="font-size:12px">${UI.esc(r.BankAccount)}</span>` : '') },
+    { key: 'AdvanceOutstanding', label: 'Advance owed', align: 'right',
+      render: r => r.AdvanceOutstanding ? `<strong>${cash(r.AdvanceOutstanding)}</strong>` : '<span class="muted">–</span>' },
+    { key: 'Status', label: 'Status', width: '80px', render: r => UI.badge(r.Status, r.Status === 'Active' ? 'good' : 'muted') },
+    { key: 'actions', label: '', align: 'right', width: '64px', render: r => d.canManage
+        ? `<button class="btn btn-sm" data-edit="${UI.esc(r[K.personKey])}">Edit</button>` : '' });
+  UI.table(host, {
+    columns: cols, rows: d.rows,
+    empty: UI.emptyState('Nobody on the register', d.canManage ? 'Add each ' + K.person + ' once; every month\'s sheet takes them from here.' : '')
+  });
+  host.querySelectorAll('[data-edit]').forEach(b => {
+    b.onclick = () => payrollPersonForm(K, projects, d.rows.find(r => r[K.personKey] === b.dataset.edit), d.mates);
+  });
+}
+
+function payrollPersonForm(K, projects, row, mates) {
+  const fields = [
+    { name: 'Name', label: 'Name', required: true },
+    { name: 'ProjectID', label: 'Project', type: 'select', required: true,
+      options: projects.filter(p => p.Status !== 'Closed' || (row && row.ProjectID === p.ProjectID))
+        .map(p => ({ value: p.ProjectID, label: p.ProjectName })) },
+    { name: 'CNIC', label: 'CNIC', placeholder: '12345-1234567-1' }
+  ];
+  if (K.kind === 'LABOUR') {
+    fields.push(
+      { name: 'Mate', label: 'Mate', placeholder: 'Company, Arbab, Jahangir…', hint: 'Who brought him' },
+      { name: 'SkillLevel', label: 'Skill', type: 'select', options: [{ value: '', label: '—' }, 'Skilled', 'Semi-skilled', 'Unskilled'] },
+      { name: 'Trade', label: 'Work', placeholder: 'Labour, Mason, Electric…' },
+      { name: 'DailyRate', label: 'Rate per day', type: 'number', required: true });
+  } else {
+    fields.push(
+      { name: 'Designation', label: 'Designation', placeholder: 'Supervisor, Storekeeper…' },
+      { name: 'BasicSalary', label: 'Basic salary (monthly)', type: 'number', required: true },
+      { name: 'Allowance', label: 'Food + other allowances', type: 'number' });
+  }
+  fields.push(
+    { name: 'PaymentMode', label: 'Paid by', type: 'select', options: ['Cash', 'Bank'] },
+    { name: 'BankAccount', label: 'Bank account', placeholder: 'Bank and account number' },
+    { name: 'Phone', label: 'Phone' },
+    { name: 'JoinDate', label: 'Joined', type: 'date' },
+    { name: 'Status', label: 'Status', type: 'select', options: ['Active', 'Left'] },
+    { name: 'Remarks', label: 'Remarks', type: 'textarea', span: 2 });
+  const body = UI.el('div');
+  const form = UI.form(fields, row || { ProjectID: payState.project[K.kind] || '', PaymentMode: 'Cash', Status: 'Active' });
+  body.appendChild(form);
+  const mate = form.querySelector('[name="Mate"]');
+  if (mate && mates && mates.length) {
+    const dl = UI.el('datalist', { id: 'payMates' });
+    dl.innerHTML = mates.map(m => `<option value="${UI.esc(m)}">`).join('');
+    body.appendChild(dl);
+    mate.setAttribute('list', 'payMates');
+  }
+  UI.modal({
+    title: row ? 'Edit ' + row.Name : 'Add ' + K.person, body,
+    footer: [
+      { label: 'Cancel', onClick: m => m.close() },
+      { label: 'Save', class: 'btn-primary', onClick: async m => {
+          const data = UI.validate(form, fields);
+          if (!data) return;
+          if (row) data[K.personKey] = row[K.personKey];
+          m.busy(true);
+          try {
+            UI.success((await api(K.savePerson, data)).message);
+            m.close();
+            payrollRegister(K, projects);
+          } catch (e) { m.busy(false); UI.error('Could not save', e.message); }
+        } }
+    ]
+  });
+}
+
+/* ---------------------------------------------------------- ONE SHEET */
+
+/** The server's arithmetic, so the sheet adds up as it is typed. */
+function payCompute(K, l, s) {
+  if (K.kind === 'LABOUR') {
+    const hpd = s.HoursPerDay || 8;
+    l.Gross = payRound(l.Days * l.DailyRate);
+    l.OTRate = Math.round(l.DailyRate / hpd * 10000) / 10000;
+    l.OTAmount = payRound(l.OTHours * l.DailyRate / hpd);
+    l.TotalGross = payRound(l.Gross + l.OTAmount);
+    l.Net = payRound(l.TotalGross - l.AdvanceDeduction - l.OtherDeduction);
+  } else {
+    const dim = s.DaysInMonth;
+    l.MonthlyTotal = payRound(l.BasicSalary + l.Allowance);
+    l.RatePerDay = Math.round(l.MonthlyTotal / dim * 10000) / 10000;
+    l.Gross = payRound(l.MonthlyTotal * l.AttendanceDays / dim);
+    l.Net = payRound(l.Gross - l.AdvanceDeduction - l.OtherDeduction - (l.TaxAmount || 0));
+  }
+  return l;
+}
+const payEarned = (K, l) => K.kind === 'LABOUR' ? l.TotalGross : l.Gross - (l.TaxAmount || 0);
+/** The most of his advances this sheet can take: what he owes, up to what he has earned. */
+function payFill(K, l) {
+  return payRound(Math.max(0, Math.min(l.AdvanceAvailable || 0, payEarned(K, l) - (l.OtherDeduction || 0))));
+}
+
+async function payrollSheetPage(root, K, id) {
+  if (!id) { navigate(K.route); return; }
+  const d = (await api(K.getSheet, id)).data;
+  const s = d.sheet;
+  const NUMS = K.kind === 'LABOUR' ? ['Days', 'DailyRate', 'OTHours', 'AdvanceDeduction', 'OtherDeduction']
+    : ['AttendanceDays', 'BasicSalary', 'Allowance', 'AdvanceDeduction', 'OtherDeduction', 'TaxAmount'];
+  const lines = d.lines.map(l => { const o = Object.assign({}, l); NUMS.forEach(f => o[f] = Number(o[f]) || 0); return o; });
+  const touched = new Set(lines.filter(l => l.AdvanceDeduction > 0).map(l => l[K.personKey]));
+  let dirty = false;
+
+  const acts = [`<button class="btn" id="psBack">← ${UI.esc(K.title)}</button>`,
+                `<button class="btn" id="psPrint">Print</button>`];
+  if (d.canEdit) acts.push(`<button class="btn" id="psCancel">Cancel sheet</button>`,
+                           `<button class="btn" id="psSave">Save</button>`);
+  if (d.canSubmit) acts.push(`<button class="btn btn-primary" id="psSubmit">Submit for checking</button>`);
+  if (d.canReturn) acts.push(`<button class="btn" id="psReturn">Return</button>`);
+  if (d.canCheck) acts.push(`<button class="btn btn-primary" id="psCheck">Mark checked</button>`);
+  if (d.canApprove) acts.push(`<button class="btn btn-primary" id="psApprove">Approve</button>`);
+  if (d.canPay && d.unpaidBank > 0) acts.push(`<button class="btn" id="psPayBank">Record bank payment</button>`);
+  if (d.canPay && d.unpaidCash > 0) acts.push(`<button class="btn btn-primary" id="psPayCash">Pay cash from float</button>`);
+
+  root.innerHTML = pageHead(id, `${K.noun} · ${s.MonthLabel} · ${s.ProjectName}`, acts.join(' ')) +
+    (s.Status === 'Returned' && s.ReturnReason ? `<div class="banner banner-warn"><div><strong>Returned:</strong>
+       ${UI.esc(s.ReturnReason)}</div></div>` : '') +
+    (d.selfBlocked ? `<div class="banner banner-info"><div>You prepared this sheet, so someone else checks and approves it.</div></div>` : '') +
+    `<div class="flex gap-8" style="margin:-6px 0 14px;align-items:center">${UI.badge(s.Status, PAYROLL_TONE[s.Status])}
+       <span class="muted" style="font-size:12.5px">${K.kind === 'LABOUR'
+         ? `Overtime at the daily rate ÷ ${s.HoursPerDay}`
+         : `${s.DaysInMonth} days in ${UI.esc(s.MonthLabel)}: rate per day = (basic + allowances) ÷ ${s.DaysInMonth}`}</span></div>
+     <div class="stat-grid" id="psTiles" style="margin-bottom:16px"></div>
+     <div class="card" style="margin-bottom:16px">
+       <div class="card-head"><h3>${d.canEdit ? 'Attendance and deductions' : 'The sheet'}</h3>
+         <div class="flex gap-8" id="psTools"></div></div>
+       <div style="overflow-x:auto"><table class="table" id="psGrid" style="min-width:${K.kind === 'LABOUR' ? 1250 : 1300}px"></table></div>
+     </div>
+     <div class="grid-2">
+       <div class="card"><div class="card-head"><h3>Advances not on any register</h3></div><div id="psUnlinked"></div></div>
+       <div class="card"><div class="card-head"><h3>History</h3></div><div id="psHistory"></div></div>
+     </div>`;
+
+  const tools = document.getElementById('psTools');
+  if (d.canEdit) {
+    const fill = UI.el('button', { class: 'btn btn-sm', text: 'Fill advances',
+      title: 'Each person\'s outstanding advances, up to what he has earned' });
+    fill.onclick = () => { lines.forEach(l => { l.AdvanceDeduction = payFill(K, l); touched.delete(l[K.personKey]); payCompute(K, l, s); }); dirty = true; draw(); };
+    tools.appendChild(fill);
+    if (d.available.length) {
+      const sel = UI.el('select', { class: 'input', style: 'width:auto;height:30px' });
+      sel.innerHTML = '<option value="">Add someone from the register…</option>' + d.available.map(p =>
+        `<option value="${UI.esc(p[K.personKey])}">${UI.esc(p.Name)}${p.Mate ? ' — ' + UI.esc(p.Mate) : ''}${p.Designation ? ' — ' + UI.esc(p.Designation) : ''}</option>`).join('');
+      sel.onchange = () => {
+        const p = d.available.find(x => x[K.personKey] === sel.value);
+        if (!p) return;
+        const l = Object.assign({}, p, { IsPaid: false });
+        if (K.kind === 'SALARY') l.AttendanceDays = s.DaysInMonth;
+        NUMS.forEach(f => l[f] = Number(l[f]) || 0);
+        payCompute(K, l, s);
+        l.AdvanceDeduction = payFill(K, l);
+        payCompute(K, l, s);
+        lines.push(l);
+        d.available.splice(d.available.indexOf(p), 1);
+        dirty = true; draw();
+        sel.querySelector(`option[value="${CSS.escape(p[K.personKey])}"]`).remove();
+        sel.value = '';
+      };
+      tools.appendChild(sel);
+    }
+  }
+
+  const input = (l, f, w) => `<input class="input" style="width:${w}px;height:30px;padding:4px 6px;text-align:right"
+     type="number" min="0" step="any" data-p="${UI.esc(l[K.personKey])}" data-f="${f}" value="${l[f] === 0 ? '' : l[f]}" placeholder="0">`;
+  const cell = (l, f, w) => d.canEdit ? input(l, f, w) : payNum(l[f]);
+
+  function draw() {
+    lines.forEach(l => payCompute(K, l, s));
+    const head = K.kind === 'LABOUR'
+      ? ['#', 'Name', 'Mate', 'Work', 'Days', 'Rate/day', 'Gross', 'OT hrs', 'OT amount', 'Total gross', 'Advance', 'Other ded.', 'Net', 'Paid by', 'Remarks', '']
+      : ['#', 'Name', 'Designation', 'Basic', 'Food + other', 'Monthly', 'Attendance', 'Rate/day', 'Gross', 'Advance', 'Other ded.', 'Tax', 'Net', 'Paid by', 'Remarks', ''];
+    const right = new Set(['Days', 'Rate/day', 'Gross', 'OT hrs', 'OT amount', 'Total gross', 'Advance', 'Other ded.', 'Net',
+                           'Basic', 'Food + other', 'Monthly', 'Attendance', 'Tax']);
+    const rows = lines.map((l, i) => {
+      const owed = l.AdvanceOutstanding ? `<div class="muted" style="font-size:11px">${l.AdvanceAvailable !== l.AdvanceOutstanding
+        ? payNum(l.AdvanceAvailable) + ' of ' + payNum(l.AdvanceOutstanding) + ' free' : 'owes ' + payNum(l.AdvanceOutstanding)}</div>` : '';
+      const name = `<strong>${UI.esc(l.Name)}</strong>${l.CNIC ? `<div class="muted" style="font-size:11px">${UI.esc(l.CNIC)}</div>` : ''}`;
+      const mode = d.canEdit
+        ? `<select class="input" style="width:78px;height:30px;padding:2px 4px" data-p="${UI.esc(l[K.personKey])}" data-f="PaymentMode">
+             <option${l.PaymentMode !== 'Bank' ? ' selected' : ''}>Cash</option><option${l.PaymentMode === 'Bank' ? ' selected' : ''}>Bank</option></select>`
+        : UI.esc(l.PaymentMode || 'Cash') + (l.IsPaid ? `<div class="muted" style="font-size:11px">paid · ${UI.esc(l.PaymentRef || '')}</div>` : '');
+      const remarks = d.canEdit
+        ? `<input class="input" style="width:140px;height:30px;padding:4px 6px" data-p="${UI.esc(l[K.personKey])}" data-f="Remarks" value="${UI.esc(l.Remarks || '')}">`
+        : UI.esc(l.Remarks || '');
+      const del = d.canEdit ? `<button class="btn btn-sm" data-del="${UI.esc(l[K.personKey])}" title="Take off this sheet">×</button>` : '';
+      const net = `<strong class="${l.Net < 0 ? 'num-neg' : ''}">${payNum(l.Net)}</strong>`;
+      const cells = K.kind === 'LABOUR'
+        ? [i + 1, name, UI.esc(l.Mate || ''), UI.esc(l.Trade || '') + (l.SkillLevel ? `<div class="muted" style="font-size:11px">${UI.esc(l.SkillLevel)}</div>` : ''),
+           cell(l, 'Days', 64), cell(l, 'DailyRate', 78), payNum(l.Gross), cell(l, 'OTHours', 64), payNum(l.OTAmount),
+           payNum(l.TotalGross), cell(l, 'AdvanceDeduction', 84) + owed, cell(l, 'OtherDeduction', 78), net, mode, remarks, del]
+        : [i + 1, name, UI.esc(l.Designation || ''), cell(l, 'BasicSalary', 86), cell(l, 'Allowance', 78), payNum(l.MonthlyTotal),
+           cell(l, 'AttendanceDays', 64), payNum(l.RatePerDay), payNum(l.Gross), cell(l, 'AdvanceDeduction', 84) + owed,
+           cell(l, 'OtherDeduction', 78), cell(l, 'TaxAmount', 70), net, mode, remarks, del];
+      return `<tr>${cells.map((c, j) => `<td${right.has(head[j]) ? ' style="text-align:right"' : ''}>${c}</td>`).join('')}</tr>`;
+    }).join('');
+    const sum = f => payRound(lines.reduce((t, l) => t + (Number(l[f]) || 0), 0));
+    const foot = K.kind === 'LABOUR'
+      ? ['', 'Total', '', '', payNum(sum('Days')), '', payNum(sum('Gross')), payNum(sum('OTHours')), payNum(sum('OTAmount')),
+         payNum(sum('TotalGross')), payNum(sum('AdvanceDeduction')), payNum(sum('OtherDeduction')), payNum(sum('Net')), '', '', '']
+      : ['', 'Total', '', payNum(sum('BasicSalary')), payNum(sum('Allowance')), payNum(sum('MonthlyTotal')), '', '',
+         payNum(sum('Gross')), payNum(sum('AdvanceDeduction')), payNum(sum('OtherDeduction')), payNum(sum('TaxAmount')),
+         payNum(sum('Net')), '', '', ''];
+    document.getElementById('psGrid').innerHTML =
+      `<thead><tr>${head.map(h => `<th${right.has(h) ? ' style="text-align:right"' : ''}>${h}</th>`).join('')}</tr></thead>
+       <tbody>${rows || `<tr><td colspan="${head.length}">${UI.emptyState('Nobody on this sheet', d.canEdit ? 'Add people from the register above.' : '')}</td></tr>`}</tbody>
+       <tfoot><tr>${foot.map((c, j) => `<td${right.has(head[j]) ? ' style="text-align:right"' : ''}><strong>${c}</strong></td>`).join('')}</tr></tfoot>`;
+    const gross = K.kind === 'LABOUR' ? sum('TotalGross') : sum('Gross');
+    const deductions = payRound(sum('AdvanceDeduction') + sum('OtherDeduction') + sum('TaxAmount'));
+    document.getElementById('psTiles').innerHTML =
+      statTile('People', String(lines.length), K.kind === 'LABOUR' ? payNum(sum('Days')) + ' days · ' + payNum(sum('OTHours')) + ' OT hrs' : 'on this sheet') +
+      statTile(K.kind === 'LABOUR' ? 'Total gross' : 'Gross', cash(gross), K.kind === 'LABOUR' ? cash(sum('OTAmount')) + ' overtime' : 'for attendance') +
+      statTile('Deductions', cash(deductions), cash(sum('AdvanceDeduction')) + ' advances') +
+      statTile('Net payable', cash(sum('Net')), s.PaidAmount ? cash(s.PaidAmount) + ' paid' : (dirty ? 'not saved yet' : 'nothing paid yet'));
+
+    const grid = document.getElementById('psGrid');
+    grid.querySelectorAll('input[data-f], select[data-f]').forEach(el => {
+      const l = lines.find(x => x[K.personKey] === el.dataset.p);
+      el.onchange = () => {
+        const f = el.dataset.f;
+        if (f === 'PaymentMode' || f === 'Remarks') { l[f] = el.value; dirty = true; return; }
+        l[f] = Number(el.value) || 0;
+        if (f === 'AdvanceDeduction') touched.add(l[K.personKey]);
+        payCompute(K, l, s);
+        // Until he types a figure himself, the advance follows what is earned.
+        if (f !== 'AdvanceDeduction' && !touched.has(l[K.personKey])) { l.AdvanceDeduction = payFill(K, l); payCompute(K, l, s); }
+        dirty = true;
+        draw();
+      };
+    });
+    grid.querySelectorAll('[data-del]').forEach(b => {
+      b.onclick = () => {
+        const i = lines.findIndex(x => x[K.personKey] === b.dataset.del);
+        if (i !== -1) lines.splice(i, 1);
+        dirty = true; draw();
+      };
+    });
+  }
+  draw();
+
+  // Advances naming nobody on a register: they cannot be deducted until linked.
+  UI.table(document.getElementById('psUnlinked'), {
+    columns: [
+      { key: 'PersonName', label: 'Given to', render: r => UI.esc(r.PersonName) + (r.PersonType ? ` <span class="muted">· ${UI.esc(r.PersonType)}</span>` : '') },
+      { key: 'IssuedDate', label: 'Date', render: r => UI.fmt.date(r.IssuedDate) },
+      { key: 'Outstanding', label: 'Owed', align: 'right', render: r => cash(r.Outstanding) },
+      { key: 'a', label: '', align: 'right', render: r => d.canLinkAdvances
+          ? `<button class="btn btn-sm" data-link="${UI.esc(r.StaffAdvanceID)}">Whose is it?</button>` : '' }
+    ],
+    rows: d.unlinkedAdvances,
+    empty: UI.emptyState('None', 'Every advance on this project names someone on a register.')
+  });
+  document.querySelectorAll('[data-link]').forEach(b => {
+    b.onclick = () => payrollLinkAdvance(K, d, d.unlinkedAdvances.find(a => a.StaffAdvanceID === b.dataset.link), id);
+  });
+  UI.table(document.getElementById('psHistory'), {
+    columns: [
+      { key: 'ActionAt', label: 'When', render: r => UI.fmt.date(r.ActionAt) },
+      { key: 'Action', label: 'Step' },
+      { key: 'UserName', label: 'By', render: r => UI.esc(r.UserName || r.UserID || '') },
+      { key: 'Comments', label: 'Note' }
+    ],
+    rows: d.history,
+    empty: UI.emptyState('Not submitted yet', '')
+  });
+
+  const payload = () => ({ lines: lines.map(l => {
+    const o = { [K.personKey]: l[K.personKey], PaymentMode: l.PaymentMode || 'Cash', Remarks: l.Remarks || '' };
+    if (l[K.lineKey]) o[K.lineKey] = l[K.lineKey];
+    NUMS.forEach(f => o[f] = l[f]);
+    return o;
+  }) });
+  const save = async () => {
+    const r = await api(K.saveSheet, id, payload());
+    dirty = false;
+    return r;
+  };
+  const on = (bid, fn) => { const b = document.getElementById(bid); if (b) b.onclick = fn; };
+  on('psBack', () => navigate(K.route));
+  on('psPrint', () => payrollPrint(K, d, lines));
+  on('psSave', async () => {
+    try { UI.success((await save()).message); navigate(K.detail, id); }
+    catch (e) { UI.error('Could not save', e.message); }
+  });
+  const act = (action, label, needReason) => async () => {
+    const go = async reason => {
+      try {
+        if (dirty && action === 'submit') await save();
+        UI.success((await api(K.action, id, action, reason || '')).message);
+        navigate(K.detail, id);
+      } catch (e) { UI.error('Could not ' + label.toLowerCase(), e.message); }
+    };
+    if (!needReason) {
+      UI.confirm({ title: label + ' ' + id + '?', confirmLabel: label, danger: action === 'cancel',
+        message: action === 'approve' ? 'Approving takes the advance deductions off each person\'s advances. It cannot be undone.'
+          : action === 'cancel' ? 'The sheet is kept, marked cancelled; its month is freed for a new one.'
+          : action === 'submit' ? 'The sheet goes for checking and can no longer be edited unless it is returned.' : '',
+        onConfirm: () => go('') });
+      return;
+    }
+    const f = [{ name: 'Reason', label: 'Why is it going back?', type: 'textarea', required: true, span: 2 }];
+    const form = UI.form(f, {});
+    UI.modal({ title: 'Return ' + id, body: form, footer: [
+      { label: 'Cancel', onClick: m => m.close() },
+      { label: 'Return', class: 'btn-primary', onClick: async m => { const v = UI.validate(form, f); if (!v) return; m.close(); await go(v.Reason); } }
+    ] });
+  };
+  on('psSubmit', act('submit', 'Submit'));
+  on('psCheck', act('check', 'Check'));
+  on('psApprove', act('approve', 'Approve'));
+  on('psCancel', act('cancel', 'Cancel'));
+  on('psReturn', act('return', 'Return', true));
+  on('psPayCash', () => payrollPayDialog(K, d, id, 'Cash'));
+  on('psPayBank', () => payrollPayDialog(K, d, id, 'Bank'));
+}
+
+function payrollPayDialog(K, d, id, mode) {
+  const amount = mode === 'Cash' ? d.unpaidCash : d.unpaidBank;
+  const fields = mode === 'Cash'
+    ? [{ name: 'CashAccountID', label: 'From float', type: 'select', required: true,
+         options: d.floats.map(f => ({ value: f.CashAccountID, label: f.CashAccountID + ' — ' + (f.Name || '') + ' (' + cash(f.Balance) + ' in hand)' })),
+         hint: d.floats.length ? '' : 'You hold no active float on this project' },
+       { name: 'TxnDate', label: 'Date paid', type: 'date', required: true, value: new Date().toISOString().slice(0, 10) }]
+    : [{ name: 'Reference', label: 'Cheque or transfer number', required: true },
+       { name: 'TxnDate', label: 'Date', type: 'date', value: new Date().toISOString().slice(0, 10) }];
+  const body = UI.el('div');
+  body.appendChild(UI.el('p', { style: 'margin:0 0 12px', text: `${cash(amount)} to everyone on ${id} paid ${mode === 'Cash' ? 'in cash' : 'by bank'} and not yet paid.` +
+    (mode === 'Cash' ? ' One entry in the float\'s ledger.' : '') }));
+  const form = UI.form(fields, {});
+  body.appendChild(form);
+  UI.modal({
+    title: mode === 'Cash' ? 'Pay cash from a float' : 'Record bank payment', body,
+    footer: [
+      { label: 'Cancel', onClick: m => m.close() },
+      { label: 'Pay ' + cash(amount), class: 'btn-primary', onClick: async m => {
+          const data = UI.validate(form, fields);
+          if (!data) return;
+          data.Mode = mode;
+          m.busy(true);
+          try { UI.success((await api(K.pay, id, data)).message); m.close(); navigate(K.detail, id); }
+          catch (e) { m.busy(false); UI.error('Could not pay', e.message); }
+        } }
+    ]
+  });
+}
+
+function payrollLinkAdvance(K, d, adv, id) {
+  const people = d.lines.concat(d.available).map(p => ({ value: p[K.personKey], label: p.Name + ' (' + p[K.personKey] + ')' }));
+  const fields = [{ name: 'PersonID', label: `${adv.PersonName}'s ${cash(adv.Outstanding)} is owed by`, type: 'select', required: true,
+                    span: 2, options: people }];
+  const form = UI.form(fields, {});
+  UI.modal({ title: 'Whose advance is ' + adv.StaffAdvanceID + '?', body: form, footer: [
+    { label: 'Cancel', onClick: m => m.close() },
+    { label: 'Link', class: 'btn-primary', onClick: async m => {
+        const v = UI.validate(form, fields);
+        if (!v) return;
+        m.busy(true);
+        try {
+          UI.success((await api('linkStaffAdvance', adv.StaffAdvanceID, { PersonType: K.personType, PersonID: v.PersonID })).message);
+          m.close(); navigate(K.detail, id);
+        } catch (e) { m.busy(false); UI.error('Could not link it', e.message); }
+      } }
+  ] });
+}
+
+/** The paper sheet, landscape, with the three signatures. */
+function payrollPrint(K, d, lines) {
+  const s = d.sheet, n = v => UI.fmt.number(v, 2);
+  const cols = K.kind === 'LABOUR'
+    ? [['#', (l, i) => i + 1], ['Mate', l => l.Mate], ['Name of labour', l => l.Name], ['Skill', l => l.SkillLevel],
+       ['CNIC', l => l.CNIC], ['Work', l => l.Trade], ['Days', l => n(l.Days), 1], ['Rate/day', l => n(l.DailyRate), 1],
+       ['Gross', l => n(l.Gross), 1], ['OT hrs', l => n(l.OTHours), 1], ['Rate/hr', l => n(l.OTRate), 1],
+       ['Total OT', l => n(l.OTAmount), 1], ['Total gross', l => n(l.TotalGross), 1],
+       ['Deductions', l => n(l.AdvanceDeduction + l.OtherDeduction), 1], ['Net salary', l => n(l.Net), 1], ['Signature', () => '']]
+    : [['#', (l, i) => i + 1], ['Name', l => l.Name], ['Designation', l => l.Designation], ['CNIC', l => l.CNIC],
+       ['Payment mode', l => l.PaymentMode === 'Bank' ? (l.BankAccount || 'Bank') : 'Cash'],
+       ['Basic salary', l => n(l.BasicSalary), 1], ['Food + other', l => n(l.Allowance), 1], ['Basic + mess', l => n(l.MonthlyTotal), 1],
+       ['Working days', l => l.DaysInMonth || s.DaysInMonth, 1], ['Rate/day', l => n(l.RatePerDay), 1],
+       ['Attendance', l => n(l.AttendanceDays), 1], ['Gross salary', l => n(l.Gross), 1],
+       ['Deductions', l => n(l.AdvanceDeduction + l.OtherDeduction), 1], ['Tax', l => n(l.TaxAmount), 1],
+       ['Net salary', l => n(l.Net), 1], ['Notes', l => l.Remarks]];
+  const sum = f => lines.reduce((t, l) => t + (Number(typeof f === 'function' ? f(l) : l[f]) || 0), 0);
+  const totals = K.kind === 'LABOUR'
+    ? { 'Days': sum('Days'), 'Gross': sum('Gross'), 'OT hrs': sum('OTHours'), 'Total OT': sum('OTAmount'), 'Total gross': sum('TotalGross'),
+        'Deductions': sum(l => l.AdvanceDeduction + l.OtherDeduction), 'Net salary': sum('Net') }
+    : { 'Basic salary': sum('BasicSalary'), 'Food + other': sum('Allowance'), 'Basic + mess': sum('MonthlyTotal'),
+        'Gross salary': sum('Gross'), 'Deductions': sum(l => l.AdvanceDeduction + l.OtherDeduction), 'Tax': sum('TaxAmount'), 'Net salary': sum('Net') };
+  const names = [s.PreparedByName, s.CheckedByName, s.ApprovedByName];
+  const body = `
+    <dl class="kv"><dt>Project</dt><dd>${UI.esc(s.ProjectName)}</dd><dt>Month</dt><dd>${UI.esc(s.MonthLabel)}</dd>
+      <dt>Status</dt><dd>${UI.esc(s.Status)}</dd></dl>
+    <table><thead><tr>${cols.map(c => `<th${c[2] ? ' class="r"' : ''}>${c[0]}</th>`).join('')}</tr></thead>
+      <tbody>${lines.map((l, i) => `<tr>${cols.map(c => `<td${c[2] ? ' class="r"' : ''}>${UI.esc(c[1](l, i) == null ? '' : c[1](l, i))}</td>`).join('')}</tr>`).join('')}</tbody>
+      <tfoot><tr>${cols.map((c, j) => `<td${c[2] ? ' class="r"' : ''}>${j === 1 ? 'Total' : (c[0] in totals ? n(totals[c[0]]) : '')}</td>`).join('')}</tr></tfoot>
+    </table>`;
+  UI.print.send(UI.print.page({
+    title: K.kind === 'LABOUR' ? 'Labour work calculation sheet' : 'Salary sheet', ref: d.sheet[K.sheetKey] || '',
+    meta: [s.MonthLabel], styles: UI.print.docStyles() + '@page{size:A4 landscape} body{font-size:10.5px} th,td{padding:4px 5px}',
+    signatures: K.signatures.map((x, i) => names[i] ? x + ' — ' + names[i] : x), body
+  }));
+}
+
+PAGES['labour'] = root => payrollHome(root, PAYROLL.labour);
+PAGES['salaries'] = root => payrollHome(root, PAYROLL.salary);
+PAGES['labour-sheet'] = (root, id) => payrollSheetPage(root, PAYROLL.labour, id);
+PAGES['salary-sheet'] = (root, id) => payrollSheetPage(root, PAYROLL.salary, id);
 </script>
 
   <script>
@@ -15463,7 +16154,8 @@ PAGES['notifications'] = pageNotifications;
     10: { name: 'Reports and Management Dashboard', done: true },
     11: { name: 'Bulk Import / Export, Templates and Documents', done: true },
     12: { name: 'Audit, Notifications, Security, Performance hardening', done: true },
-    13: { name: 'Working cash advances and site imprest', done: true }
+    13: { name: 'Working cash advances and site imprest', done: true },
+    14: { name: 'Labour and salaries', done: true }
   };
 
   /**
@@ -15501,6 +16193,8 @@ PAGES['notifications'] = pageNotifications;
     'cash-account': 'cash',
     'cash-reports': 'cash',
     'cash-report': 'cash',
+    'labour-sheet': 'labour',
+    'salary-sheet': 'salaries',
     report: 'reports',
     profile: null
   };
