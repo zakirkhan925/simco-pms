@@ -4304,9 +4304,19 @@ async function loadBudget(projectId, sym) {
     const actions = document.getElementById('budgetActions');
     if (actions && !actions.dataset.filled) {
       actions.dataset.filled = '1';
+      if (d.quantityTracking) {
+        const run = UI.el('button', { class: 'btn btn-sm', text: 'Run update' });
+        run.onclick = () => runBudgetUpdateDialog(projectId, sym);
+        actions.appendChild(run);
+        if (d.canTag) {
+          const tag = UI.el('button', { class: 'btn btn-sm', text: 'Tag PO lines' });
+          tag.onclick = () => openPoTagger(projectId, { onDone: () => loadBudget(projectId, sym) });
+          actions.appendChild(tag);
+        }
+      }
       if (d.canEdit) {
         const add = UI.el('button', { class: 'btn btn-sm btn-primary', text: '+ Add line' });
-        add.onclick = () => openBudgetForm(projectId, null, sym);
+        add.onclick = () => openBudgetForm(projectId, null, sym, d.quantityTracking);
         actions.appendChild(add);
       }
       actions.appendChild(importExportBar('BUDGET', projectId,
@@ -4337,6 +4347,7 @@ async function loadBudget(projectId, sym) {
           `<span class="mono"><strong>${UI.esc(r.CostCode)}</strong></span><br>
            <span class="muted">${UI.esc(r.Category)}</span>` },
         { key: 'Description', label: 'Description' },
+        ...(d.quantityTracking ? budgetQtyColumns() : []),
         { key: 'RevisedBudget', label: 'Budget', align: 'right', render: r =>
           r.RevisedBudget !== r.OriginalBudget
             ? `${UI.fmt.number(r.RevisedBudget)}<br><span class="muted">was ${UI.fmt.number(r.OriginalBudget)}</span>`
@@ -4362,7 +4373,7 @@ async function loadBudget(projectId, sym) {
 
     mount.querySelectorAll('[data-edit]').forEach(b => {
       const row = d.rows.find(r => r.BudgetID === b.dataset.edit);
-      b.onclick = () => openBudgetForm(projectId, row, sym);
+      b.onclick = () => openBudgetForm(projectId, row, sym, d.quantityTracking);
     });
     mount.querySelectorAll('[data-del]').forEach(b => {
       const row = d.rows.find(r => r.BudgetID === b.dataset.del);
@@ -4394,7 +4405,14 @@ async function loadBudget(projectId, sym) {
   }
 }
 
-function openBudgetForm(projectId, existing, sym) {
+function openBudgetForm(projectId, existing, sym, withQty) {
+  const qtyFields = withQty ? [
+    { name: 'ItemCode', label: 'Material code', hint: 'From the item master; leave blank for a line that buys no one material' },
+    { name: 'Unit', label: 'Unit', type: 'select', options: [''].concat(App.enums.UNITS || []),
+      hint: 'Blank takes the material\'s unit' },
+    { name: 'BudgetQty', label: 'Required quantity', type: 'number', span: 2,
+      hint: 'How much the project needs. Purchased, received and issued are counted against it' }
+  ] : [];
   const fields = [
     { name: 'CostCode', label: 'Cost code', required: true },
     { name: 'Category', label: 'Category', type: 'select', required: true,
@@ -4404,8 +4422,9 @@ function openBudgetForm(projectId, existing, sym) {
     { name: 'RevisedBudget', label: 'Revised budget', type: 'number', hint: 'Leave blank to keep the original' },
     { name: 'Forecast', label: 'Forecast override', type: 'number', span: 2,
       hint: 'Leave blank to let the system forecast from actual cost plus open commitments' }
-  ];
+  ].concat(qtyFields);
   const body = UI.form(fields, existing || {});
+  if (withQty) attachMaterialList(body.querySelector('[name="ItemCode"]'));
   UI.modal({
     title: existing ? 'Edit budget line' : 'Add budget line', size: 'wide', body,
     footer: [
@@ -4424,6 +4443,203 @@ function openBudgetForm(projectId, existing, sym) {
         } catch (e) { UI.error('Could not save', e.message); }
         finally { m.busy(false); }
       }}
+    ]
+  });
+}
+
+/* ---------------------------------------- BUDGET QUANTITIES (9 Nov 2026) */
+
+/** Required, purchased, received, issued and still to buy, for a budget line. */
+function budgetQtyColumns() {
+  const q = v => v === null || v === undefined ? '<span class="muted">—</span>' : UI.fmt.number(v, 2);
+  return [
+    { key: 'ItemCode', label: 'Material', render: r => r.ItemCode
+      ? `<span class="mono">${UI.esc(r.ItemCode)}</span><br><span class="muted">${UI.esc(r.Unit || '')}</span>`
+      : `<span class="muted">${UI.esc(r.Unit || '—')}</span>` },
+    { key: 'BudgetQty', label: 'Required', align: 'right', render: r => q(r.BudgetQty) },
+    { key: 'PurchasedQty', label: 'Purchased', align: 'right', render: r =>
+      q(r.PurchasedQty) + (r.OverBoughtQty ? `<br><span class="state-error">${UI.fmt.number(r.OverBoughtQty, 2)} over</span>` : '') +
+      (r.OtherUnitQty ? `<br><span class="muted" title="Ordered in another unit; not added in">+${UI.fmt.number(r.OtherUnitQty, 2)} other unit</span>` : '') },
+    { key: 'ReceivedQty', label: 'Received', align: 'right', render: r =>
+      q(r.ReceivedQty) + (r.ToReceiveQty ? `<br><span class="muted">${UI.fmt.number(r.ToReceiveQty, 2)} due</span>` : '') },
+    { key: 'IssuedQty', label: 'Issued', align: 'right', render: r => q(r.IssuedQty) },
+    { key: 'ToBuyQty', label: 'To buy', align: 'right', render: r => r.ToBuyQty === null || r.ToBuyQty === undefined
+      ? '<span class="muted">—</span>' : `<strong>${UI.fmt.number(r.ToBuyQty, 2)}</strong>` }
+  ];
+}
+
+let materialCodesCache = null;
+/** A type-ahead of the item master on a material-code box. */
+async function attachMaterialList(input) {
+  if (!input) return;
+  try {
+    if (!materialCodesCache) materialCodesCache = (await api('getMaterialCodes')).data;
+  } catch (e) { return; }
+  attachDatalist(input, materialCodesCache.map(m => ({ value: m.code, label: m.name + (m.unit ? ' · ' + m.unit : '') })));
+}
+function attachDatalist(input, options) {
+  const id = 'dl_' + Math.random().toString(36).slice(2);
+  const dl = UI.el('datalist', { id });
+  dl.innerHTML = options.map(o => `<option value="${UI.esc(o.value)}">${UI.esc(o.label || '')}</option>`).join('');
+  input.setAttribute('list', id);
+  input.parentNode.appendChild(dl);
+}
+
+/** "Run update": recompute the budget and show what the PO lines carry that it does not. */
+async function runBudgetUpdateDialog(projectId, sym) {
+  let d;
+  try { d = (await api('runBudgetUpdate', projectId)).data; }
+  catch (e) { UI.error('Could not run the update', e.message); return; }
+  const body = UI.el('div');
+  const sec = (title, html) => `<div class="card-title" style="margin:16px 0 8px">${UI.esc(title)}</div>${html}`;
+  const n = v => UI.fmt.number(v, 2);
+  body.innerHTML =
+    `<p style="margin:0">${d.rows.length} budget line(s) recalculated from live orders, receipts, issues, invoices and
+      expenses${d.stored ? `; ${d.changed} line(s) had new committed or actual figures, now stored`
+        : ' (shown only: storing needs budget edit rights on an open project)'}.</p>` +
+    (d.misspeltCostCodes && d.misspeltCostCodes.length ? sec('Cost codes spelt differently from a budget line',
+      `<p class="muted" style="margin:0 0 8px">These PO lines count nowhere until they carry the budget line's spelling.</p>
+       <div class="table-wrap"><table class="data"><thead><tr><th>Written on PO</th><th>Budget line</th>
+       <th class="num">Lines</th><th></th></tr></thead><tbody>${d.misspeltCostCodes.map((m, i) => `<tr>
+       <td class="mono">${m.Written.map(w => UI.esc(JSON.stringify(w))).join(', ')}</td><td class="mono">${UI.esc(m.BudgetCode)}</td>
+       <td class="num">${m.Lines}</td><td class="num">${d.canTag ? `<button class="btn btn-sm" data-fix="${i}">Fix</button>` : ''}</td>
+       </tr>`).join('')}</tbody></table></div>`) : '') +
+    (d.missingCostCodes.length ? sec('Cost codes on PO lines with no budget line',
+      `<div class="table-wrap"><table class="data"><thead><tr>${d.canAddLines ? '<th style="width:32px"></th>' : ''}
+       <th>Cost code</th><th>Items</th><th class="num">Lines</th><th class="num">Ordered</th><th class="num">Value</th>
+       </tr></thead><tbody>${d.missingCostCodes.map(m => `<tr>
+       ${d.canAddLines ? `<td><input type="checkbox" data-add="${UI.esc(m.CostCode)}" checked></td>` : ''}
+       <td class="mono">${UI.esc(m.CostCode)}</td><td>${UI.esc(m.Items.join(', '))}</td><td class="num">${m.Lines}</td>
+       <td class="num">${n(m.OrderedQty)} ${UI.esc(m.Unit || '')}</td><td class="num">${UI.fmt.money(m.Value, sym)}</td>
+       </tr>`).join('')}</tbody></table></div>
+       ${d.canAddLines ? '<div class="flex gap-8 mt-8"><button class="btn btn-sm btn-primary" id="addMissing">Add ticked as budget lines</button><span class="muted">Amount 0 and no required quantity — fill those in after.</span></div>' : ''}`)
+      : sec('Cost codes on PO lines with no budget line', '<p class="muted" style="margin:0">None.</p>')) +
+    sec('PO lines with no cost code that match no budget line',
+      d.untagged.count
+        ? `<p style="margin:0">${d.untagged.count} line(s), ${UI.fmt.money(d.untagged.value, sym)} ordered.
+           ${d.canTag ? '<button class="btn btn-sm" id="tagUntagged">Tag them</button>' : ''}</p>`
+        : '<p class="muted" style="margin:0">None.</p>') +
+    (d.otherUnits.length ? sec('Ordered in another unit (not added in)',
+      `<p style="margin:0">${d.otherUnits.map(o => `<span class="mono">${UI.esc(o.CostCode)}</span>: ${n(o.Qty)} not in ${UI.esc(o.Unit)}`).join('; ')}.
+       Order these in the budget line's unit, or give them their own line.</p>`) : '');
+  const m = UI.modal({ title: 'Budget update', size: 'wide', body,
+    footer: [{ label: 'Close', onClick: x => { x.close(); loadBudget(projectId, sym); } }] });
+  body.querySelectorAll('[data-fix]').forEach(b => {
+    const fix = d.misspeltCostCodes[Number(b.dataset.fix)];
+    b.onclick = async () => {
+      try {
+        const r = await api('tagPoLines', fix.POItemIDs.map(id => ({ POItemID: id, CostCode: fix.BudgetCode })));
+        UI.success('Fixed', r.message); m.close(); runBudgetUpdateDialog(projectId, sym);
+      } catch (e) { UI.error('Could not fix', e.message); }
+    };
+  });
+  const add = body.querySelector('#addMissing');
+  if (add) add.onclick = async () => {
+    const codes = [...body.querySelectorAll('[data-add]:checked')].map(c => c.dataset.add);
+    if (!codes.length) { UI.warn('Tick the cost codes to add'); return; }
+    try {
+      const r = await api('addMissingBudgetLines', projectId, codes);
+      UI.success('Budget lines added', r.message); m.close(); loadBudget(projectId, sym);
+    } catch (e) { UI.error('Could not add', e.message); }
+  };
+  const tag = body.querySelector('#tagUntagged');
+  if (tag) tag.onclick = () => { m.close(); openPoTagger(projectId, { untaggedOnly: true, onDone: () => loadBudget(projectId, sym) }); };
+}
+
+/**
+ * Tag PO lines (9 Nov 2026): cost code and material code on any order not
+ * cancelled, posted ones included. Quantities and rates are not touched, so
+ * nothing goes back for approval. One order (opts.poId) or the whole project.
+ */
+async function openPoTagger(projectId, opts) {
+  opts = opts || {};
+  let d;
+  try { d = (await api('listPoLinesForTagging', projectId, { poId: opts.poId || '' })).data; }
+  catch (e) { UI.error('Could not load the PO lines', e.message); return; }
+  const body = UI.el('div');
+  body.innerHTML = `
+    <div class="banner banner-info"><div>Set the cost code and material code of each line. Quantities and rates do
+      not change, so approved and received orders stay as they are; every change is in the audit log.
+      ${d.closed ? '<strong>This project is closed.</strong>' : ''}</div></div>
+    <div class="filters mt-8">
+      <input class="input" id="tgSearch" placeholder="Search PO, item, vendor…" style="max-width:260px">
+      <label class="flex gap-8" style="align-items:center"><input type="checkbox" id="tgUntagged" ${opts.untaggedOnly ? 'checked' : ''}>
+        Only lines missing a code</label>
+      <span class="muted" style="margin-left:auto">For ticked lines:</span>
+      <input class="input" id="tgBulkCost" placeholder="Cost code" style="max-width:130px">
+      <input class="input" id="tgBulkItem" placeholder="Material code" style="max-width:150px">
+      <button class="btn btn-sm" id="tgApply">Apply</button>
+    </div>
+    <div class="table-wrap mt-8" style="max-height:52vh;overflow:auto"><table class="data" id="tgTable">
+      <thead><tr><th style="width:28px"><input type="checkbox" id="tgAll"></th><th>PO</th><th>Item</th>
+        <th class="num">Qty</th><th>Unit</th><th style="min-width:140px">Cost code</th><th style="min-width:160px">Material code</th></tr></thead>
+      <tbody></tbody></table></div>
+    <div class="muted mt-8" id="tgCount"></div>`;
+  const costList = 'tgCostCodes', itemList = 'tgItems';
+  const dl1 = UI.el('datalist', { id: costList });
+  dl1.innerHTML = d.costCodes.map(c => `<option value="${UI.esc(c.code)}">${UI.esc(c.description || '')}</option>`).join('');
+  const dl2 = UI.el('datalist', { id: itemList });
+  dl2.innerHTML = d.materials.map(m => `<option value="${UI.esc(m.code)}">${UI.esc(m.name + (m.unit ? ' · ' + m.unit : ''))}</option>`).join('');
+  body.appendChild(dl1); body.appendChild(dl2);
+  body.querySelector('#tgBulkCost').setAttribute('list', costList);
+  body.querySelector('#tgBulkItem').setAttribute('list', itemList);
+  const tbody = body.querySelector('tbody');
+  tbody.innerHTML = d.rows.map(r => `<tr data-id="${UI.esc(r.POItemID)}" data-cost="${UI.esc(r.CostCode)}" data-item="${UI.esc(r.ItemCode)}"
+      data-text="${UI.esc((r.PONumber + ' ' + r.ItemName + ' ' + r.Vendor + ' ' + r.CostCode + ' ' + r.ItemCode).toLowerCase())}">
+      <td><input type="checkbox" data-pick></td>
+      <td><span class="mono">${UI.esc(r.PONumber)}</span><br><span class="muted">${UI.esc(r.Status)} · ${UI.esc(r.Vendor)}</span></td>
+      <td>${UI.esc(r.ItemName)}</td><td class="num">${UI.fmt.number(r.OrderedQty, 2)}</td><td>${UI.esc(r.Unit)}</td>
+      <td><input class="input" data-f="CostCode" list="${costList}" value="${UI.esc(r.CostCode)}"></td>
+      <td><input class="input" data-f="ItemCode" list="${itemList}" value="${UI.esc(r.ItemCode)}"></td></tr>`).join('');
+  const rows = () => [...tbody.querySelectorAll('tr')];
+  const changed = () => rows().filter(tr => tr.querySelector('[data-f="CostCode"]').value.trim() !== tr.dataset.cost ||
+    tr.querySelector('[data-f="ItemCode"]').value.trim() !== tr.dataset.item);
+  const filter = () => {
+    const q = body.querySelector('#tgSearch').value.trim().toLowerCase();
+    const only = body.querySelector('#tgUntagged').checked;
+    let shown = 0;
+    rows().forEach(tr => {
+      const missing = !tr.dataset.cost || !tr.dataset.item;
+      const show = (!q || tr.dataset.text.indexOf(q) !== -1) && (!only || missing);
+      tr.style.display = show ? '' : 'none';
+      if (show) shown++;
+    });
+    body.querySelector('#tgCount').textContent = `${shown} of ${d.rows.length} line(s) shown · ${changed().length} changed, not saved`;
+  };
+  body.querySelector('#tgSearch').addEventListener('input', filter);
+  body.querySelector('#tgUntagged').addEventListener('change', filter);
+  tbody.addEventListener('input', filter);
+  body.querySelector('#tgAll').addEventListener('change', e =>
+    rows().filter(tr => tr.style.display !== 'none').forEach(tr => { tr.querySelector('[data-pick]').checked = e.target.checked; }));
+  body.querySelector('#tgApply').onclick = () => {
+    const cost = body.querySelector('#tgBulkCost').value.trim(), item = body.querySelector('#tgBulkItem').value.trim();
+    const picked = rows().filter(tr => tr.querySelector('[data-pick]').checked && tr.style.display !== 'none');
+    if (!picked.length) { UI.warn('Tick the lines first'); return; }
+    if (!cost && !item) { UI.warn('Enter a cost code or a material code to apply'); return; }
+    picked.forEach(tr => {
+      if (cost) tr.querySelector('[data-f="CostCode"]').value = cost;
+      if (item) tr.querySelector('[data-f="ItemCode"]').value = item;
+    });
+    filter();
+  };
+  filter();
+  UI.modal({
+    title: opts.poId ? 'Tag codes — ' + opts.poId : 'Tag PO lines', size: 'wide', body,
+    footer: [
+      { label: 'Cancel', onClick: m => m.close() },
+      { label: 'Save changes', class: 'btn-primary', onClick: async m => {
+        const list = changed().map(tr => ({ POItemID: tr.dataset.id,
+          CostCode: tr.querySelector('[data-f="CostCode"]').value.trim(),
+          ItemCode: tr.querySelector('[data-f="ItemCode"]').value.trim() }));
+        if (!list.length) { UI.warn('Nothing has changed'); return; }
+        m.busy(true);
+        try {
+          const r = await api('tagPoLines', list);
+          m.close(); UI.success('Codes saved', r.message);
+          if (opts.onDone) opts.onDone();
+        } catch (e) { UI.error('Could not save', e.message); }
+        finally { m.busy(false); }
+      } }
     ]
   });
 }
@@ -7259,6 +7475,8 @@ async function pagePurchaseOrderDetail(root, poId) {
   const actions = [`<button class="btn" id="backPos">← All orders</button>`,
                    `<button class="btn" id="printPo">Print</button>`];
   if (d.canEdit) actions.push(`<button class="btn" id="editPo">Edit</button>`);
+  // Cost code and material code, on any order not cancelled (9 Nov 2026).
+  if (d.canTag) actions.push(`<button class="btn" id="tagPo">Tag codes</button>`);
   if (d.canSubmit) actions.push(`<button class="btn btn-primary" id="submitPo">Send for approval</button>`);
   if (d.canDecide) actions.push(
     `<button class="btn btn-danger" id="rejectPo">Send back</button>`,
@@ -7365,6 +7583,8 @@ async function pagePurchaseOrderDetail(root, poId) {
   document.getElementById('printPo').onclick = () => printPurchaseOrder(po.POID);
   const bind = (id, fn) => { const b = document.getElementById(id); if (b) b.onclick = fn; };
   bind('editPo', () => openPoEditForm(d));
+  bind('tagPo', () => openPoTagger(po.ProjectID, { poId: po.POID,
+    onDone: () => navigate('purchase-order', po.POID) }));
   bind('submitPo', () => UI.confirm({
     title: 'Send for approval',
     message: 'The order goes to management. Approving it commits ' + money(po.Total) + ' to the budget.',
@@ -7598,6 +7818,58 @@ function buildPoForm(existing, projects, vendors) {
   if (existing && existing.items.length) existing.items.forEach(addRow);
   else addRow();
 
+  // A new order is kept in this browser as it is typed (owner's request, 9 Nov 2026):
+  // closing the window loses nothing, and the next "New purchase order" offers it back.
+  const draftKey = 'pms_po_draft_' + ((App.user && App.user.UserID) || '');
+  const snapshot = () => {
+    const head = {};
+    form.querySelectorAll('[name]').forEach(f => { head[f.name] = f.value; });
+    const rows = [];
+    tbody.querySelectorAll('tr').forEach(tr => {
+      const r = {};
+      tr.querySelectorAll('[data-f]').forEach(f => { r[f.dataset.f] = f.value; });
+      rows.push(r);
+    });
+    return { head, rows, savedAt: new Date().toISOString() };
+  };
+  const hasContent = d => d && (d.rows.some(r => r.ItemName || r.OrderedQty || r.Rate) ||
+    ['DeliveryLocation', 'PaymentTerms', 'Remarks'].some(k => d.head[k]));
+  const forgetDraft = () => { try { localStorage.removeItem(draftKey); } catch (e) {} };
+  if (!existing) {
+    let saved = null;
+    try { saved = JSON.parse(localStorage.getItem(draftKey) || 'null'); } catch (e) { saved = null; }
+    const save = () => {
+      const d = snapshot();
+      try { if (hasContent(d)) localStorage.setItem(draftKey, JSON.stringify(d)); } catch (e) {}
+    };
+    form.addEventListener('input', save); form.addEventListener('change', save);
+    itemsWrap.addEventListener('input', save); itemsWrap.addEventListener('change', save);
+    itemsWrap.addEventListener('click', e => { if (e.target.closest('[data-remove], #addPoItem')) setTimeout(save, 0); });
+    if (hasContent(saved)) {
+      const lines = saved.rows.filter(r => r.ItemName || r.OrderedQty).length;
+      const vendor = (vendors.find(v => v.VendorID === saved.head.VendorID) || {}).CompanyName || '';
+      const banner = UI.el('div', { class: 'banner banner-info' }, `<div style="flex:1">
+        <strong>Unsaved order from ${UI.esc(UI.fmt.dateTime(saved.savedAt))}</strong>${vendor ? ' — ' + UI.esc(vendor) : ''},
+        ${lines} line${lines === 1 ? '' : 's'}. Resume it, or start typing to begin a new one in its place.</div>
+        <div class="flex gap-8"><button class="btn btn-sm" data-discard>Discard</button>
+        <button class="btn btn-sm btn-primary" data-resume>Resume</button></div>`);
+      body.insertBefore(banner, body.firstChild);
+      banner.querySelector('[data-discard]').onclick = () => { forgetDraft(); banner.remove(); };
+      banner.querySelector('[data-resume]').onclick = () => {
+        Object.keys(saved.head).forEach(k => {
+          const f = form.querySelector('[name="' + k + '"]');
+          if (f && !f.disabled) f.value = saved.head[k];
+        });
+        tbody.innerHTML = '';
+        (saved.rows.length ? saved.rows : [{}]).forEach(r => addRow({
+          ItemCode: r.ItemCode, ItemName: r.ItemName, Unit: r.Unit, CostCode: r.CostCode,
+          OrderedQty: r.OrderedQty === '' ? undefined : r.OrderedQty, Rate: r.Rate === '' ? undefined : r.Rate }));
+        recalc();
+        banner.remove();
+      };
+    }
+  }
+
   UI.modal({
     title: existing ? 'Edit ' + existing.po.POID : 'New purchase order', size: 'wide', body,
     footer: [
@@ -7633,6 +7905,7 @@ function buildPoForm(existing, projects, vendors) {
           } else {
             const res = await api('createPurchaseOrder', head.ProjectID,
               Object.assign({}, head, { items: items }));
+            forgetDraft();
             m.close(); UI.success('Order created', res.message);
             navigate('purchase-order', res.data.POID);
           }
