@@ -1495,9 +1495,9 @@ const NAV = [
     { id: 'reports',        label: 'Reports',        icon: '◳', phase: 10, perm: 'report.view' }
   ]},
   // Labour and salaries, each its own module (owner's request, 9 Nov 2026).
-  { group: 'Labour & Salaries', items: [
-    { id: 'labour',   label: 'Labour',   icon: '☷', phase: 14, perm: 'labour.view' },
-    { id: 'salaries', label: 'Salaries', icon: '◷', phase: 14, perm: 'salary.view' }
+  { group: 'Workforce & Payroll', items: [
+    { id: 'labour',   label: 'Labour Wages',  icon: '☷', phase: 14, perm: 'labour.view' },
+    { id: 'salaries', label: 'Staff Payroll', icon: '◷', phase: 14, perm: 'salary.view' }
   ]},
   { group: 'Administration', items: [
     { id: 'users',    label: 'Users',              icon: '◕', phase: 1, perm: 'user.view' },
@@ -3628,6 +3628,8 @@ function renderProjectOverview(host, d, sym) {
           <tr><th scope="row">Expenses</th><td>${money(m.actualBreakdown.expenses)}</td></tr>
           <tr><th scope="row">Supplier invoices</th><td>${money(m.actualBreakdown.supplierInvoices)}</td></tr>
           <tr><th scope="row">Subcontractor bills</th><td>${money(m.actualBreakdown.subcontractorBills)}</td></tr>
+          ${'labour' in m.actualBreakdown ? `<tr><th scope="row">Labour sheets</th><td>${money(m.actualBreakdown.labour)}</td></tr>
+          <tr><th scope="row">Salary sheets</th><td>${money(m.actualBreakdown.salaries)}</td></tr>` : ''}
           <tr class="key"><th scope="row">Actual cost</th><td>${money(m.actualCost)}</td></tr>
           <tr><th scope="row">Committed, not yet invoiced</th><td>${money(Math.max(0, m.committedCost - m.actualBreakdown.supplierInvoices))}</td></tr>
           <tr class="total"><th scope="row">Forecast cost</th><td>${money(m.forecastCost)}</td></tr>
@@ -13745,7 +13747,7 @@ PAGES['cash-report'] = pageCashReport;
 
 const PAYROLL = {
   labour: {
-    kind: 'LABOUR', route: 'labour', detail: 'labour-sheet', title: 'Labour', perm: 'labour',
+    kind: 'LABOUR', route: 'labour', detail: 'labour-sheet', title: 'Labour Wages', perm: 'labour',
     sub: 'Labour register and the monthly labour work calculation sheet',
     noun: 'Labour sheet', registerTitle: 'Labour register', person: 'labourer',
     listPeople: 'listLabour', savePerson: 'saveLabour', personKey: 'LabourID',
@@ -13755,7 +13757,7 @@ const PAYROLL = {
     signatures: ['Prepared by', 'Checked by', 'Approved by (CEO / MD)']
   },
   salary: {
-    kind: 'SALARY', route: 'salaries', detail: 'salary-sheet', title: 'Salaries', perm: 'salary',
+    kind: 'SALARY', route: 'salaries', detail: 'salary-sheet', title: 'Staff Payroll', perm: 'salary',
     sub: 'Employee register and the monthly salary sheet',
     noun: 'Salary sheet', registerTitle: 'Employee register', person: 'employee',
     listPeople: 'listEmployees', savePerson: 'saveEmployee', personKey: 'EmployeeID',
