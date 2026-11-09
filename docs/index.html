@@ -7091,6 +7091,8 @@ function openPoFromRfqForm(d) {
       value: d.project ? d.project.ProjectName : '' },
     { name: 'PaymentTerms', label: 'Payment terms' },
     { name: 'DiscountPercent', label: 'Discount %', type: 'number', value: 0 },
+    { name: 'Deduction', label: 'Less: deduction (Rs)', type: 'number', value: 0,
+      hint: 'A fixed amount off the order. Use this or Discount %, not both.' },
     { name: 'TaxPercent', label: 'Tax %', type: 'number',
       value: App.settings.defaultTaxPercent === undefined ? 0 : App.settings.defaultTaxPercent },
     { name: 'Remarks', label: 'Remarks', type: 'textarea', span: 2 }
@@ -7313,6 +7315,7 @@ async function pagePurchaseOrderDetail(root, poId) {
       <div><span>Subtotal</span><strong>${money(po.Subtotal)}</strong></div>
       ${po.DiscountPercent ? `<div><span>Discount ${UI.esc(po.DiscountPercent)}%</span>
         <strong>− ${money(po.DiscountAmount)}</strong></div>` : ''}
+      ${po.Deduction ? `<div><span>Less: deduction</span><strong>− ${money(po.Deduction)}</strong></div>` : ''}
       ${po.TaxPercent ? `<div><span>Tax ${UI.esc(po.TaxPercent)}%</span>
         <strong>${money(po.TaxAmount)}</strong></div>` : ''}
       <div class="grand"><span>Total</span><strong>${money(po.Total)}</strong></div>
@@ -7498,6 +7501,8 @@ function buildPoForm(existing, projects, vendors) {
     { name: 'DeliveryLocation', label: 'Deliver to', required: true },
     { name: 'PaymentTerms', label: 'Payment terms' },
     { name: 'DiscountPercent', label: 'Discount %', type: 'number', value: 0 },
+    { name: 'Deduction', label: 'Less: deduction (Rs)', type: 'number', value: 0,
+      hint: 'A fixed amount off the order. Use this or Discount %, not both.' },
     { name: 'TaxPercent', label: 'Tax %', type: 'number', value: 0 },
     { name: 'Remarks', label: 'Remarks', type: 'textarea', span: 2 }
   ].concat(revising ? [{ name: 'Reason', label: 'Reason for the change', type: 'textarea', span: 2,
@@ -7506,6 +7511,7 @@ function buildPoForm(existing, projects, vendors) {
     ProjectID: existing.po.ProjectID, VendorID: existing.po.VendorID,
     DeliveryDate: existing.po.DeliveryDate, DeliveryLocation: existing.po.DeliveryLocation,
     PaymentTerms: existing.po.PaymentTerms, DiscountPercent: existing.po.DiscountPercent,
+    Deduction: existing.po.Deduction || 0,
     TaxPercent: existing.po.TaxPercent, Remarks: existing.po.Remarks
   } : {};
 
@@ -7524,10 +7530,10 @@ function buildPoForm(existing, projects, vendors) {
     ${fromRfq ? '<span class="muted">Rates and items come from the awarded quotation; quantities can change</span>'
               : '<button class="btn btn-sm" id="addPoItem">+ Add line</button>'}</div>
     <div class="table-wrap"><table class="data" id="poItemTable">
-      <thead><tr><th style="width:110px">Code</th><th>Item</th><th style="width:90px">Unit</th>
-        <th style="width:110px">Cost code</th><th class="num" style="width:100px">Qty</th>
-        <th class="num" style="width:110px">Rate</th><th class="num" style="width:120px">Amount</th>
-        <th style="width:40px"></th></tr></thead>
+      <thead><tr><th style="width:80px">Code</th><th style="min-width:220px">Item</th><th style="width:85px">Unit</th>
+        <th style="width:85px">Cost code</th><th class="num" style="width:80px">Qty</th>
+        <th class="num" style="width:95px">Rate</th><th class="num" style="width:100px">Amount</th>
+        <th style="width:32px"></th></tr></thead>
       <tbody></tbody>
       <tfoot><tr><th colspan="6" class="num">Total</th>
         <th class="num" id="poItemTotal">0</th><th></th></tr></tfoot></table></div>`;
@@ -7547,10 +7553,11 @@ function buildPoForm(existing, projects, vendors) {
     });
     const disc = Number(form.querySelector('[name="DiscountPercent"]').value) || 0;
     const tax = Number(form.querySelector('[name="TaxPercent"]').value) || 0;
-    const taxable = subtotal - (subtotal * disc / 100);
+    const ded = Number(form.querySelector('[name="Deduction"]').value) || 0;
+    const taxable = subtotal - (disc ? subtotal * disc / 100 : ded);
     itemsWrap.querySelector('#poItemTotal').textContent = money(taxable + taxable * tax / 100);
   }
-  ['DiscountPercent', 'TaxPercent'].forEach(n =>
+  ['DiscountPercent', 'Deduction', 'TaxPercent'].forEach(n =>
     form.querySelector('[name="' + n + '"]').addEventListener('input', recalc));
 
   function addRow(v) {
@@ -7604,6 +7611,8 @@ function buildPoForm(existing, projects, vendors) {
           const row = {};
           tr.querySelectorAll('[data-f]').forEach(f => { row[f.dataset.f] = f.value.trim(); });
           if (!row.ItemName) bad = bad || ('Line ' + (i + 1) + ' needs an item name.');
+          if (Number(row.OrderedQty) < 0) bad = bad || ('Line ' + (i + 1) + ': a quantity cannot be negative. ' +
+            'For a deduction, remove this line and use "Less: deduction (Rs)" above.');
           if (!(Number(row.OrderedQty) > 0)) bad = bad || ('Line ' + (i + 1) + ' needs a quantity.');
           const min = Number(tr.querySelector('[data-f="OrderedQty"]').min || 0);
           if (min && Number(row.OrderedQty) < min) bad = bad || ('Line ' + (i + 1) + ': ' + min + ' has already been received.');
@@ -7680,6 +7689,8 @@ async function printPurchaseOrder(poId) {
           <tr><td colspan="4" class="r">Subtotal</td><td class="r">${n(d.po.Subtotal)}</td></tr>
           ${d.po.DiscountPercent ? `<tr><td colspan="4" class="r">Discount ${d.po.DiscountPercent}%</td>
             <td class="r">\u2212 ${n(d.po.DiscountAmount)}</td></tr>` : ''}
+          ${d.po.Deduction ? `<tr><td colspan="4" class="r">Less: deduction</td>
+            <td class="r">\u2212 ${n(d.po.Deduction)}</td></tr>` : ''}
           ${d.po.TaxPercent ? `<tr><td colspan="4" class="r">Tax ${d.po.TaxPercent}%</td>
             <td class="r">${n(d.po.TaxAmount)}</td></tr>` : ''}
           <tr><td colspan="4" class="r">Total (${UI.esc(sym)})</td><td class="r">${n(d.po.Total)}</td></tr>
