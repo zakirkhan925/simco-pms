@@ -4305,6 +4305,12 @@ async function loadBudget(projectId, sym) {
     if (actions && !actions.dataset.filled) {
       actions.dataset.filled = '1';
       if (d.quantityTracking) {
+        // Track the budget by cost, by quantity, or both (owner's request, 9 Nov 2026).
+        const view = UI.el('select', { class: 'input', style: 'width:auto;height:30px', title: 'Track by' });
+        view.innerHTML = [['both', 'Cost and quantity'], ['cost', 'Cost only'], ['qty', 'Quantity only']]
+          .map(o => `<option value="${o[0]}"${budgetView() === o[0] ? ' selected' : ''}>${o[1]}</option>`).join('');
+        view.onchange = () => { try { localStorage.setItem('pms_budget_view', view.value); } catch (e) {} loadBudget(projectId, sym); };
+        actions.appendChild(view);
         const run = UI.el('button', { class: 'btn btn-sm', text: 'Run update' });
         run.onclick = () => runBudgetUpdateDialog(projectId, sym);
         actions.appendChild(run);
@@ -4325,6 +4331,22 @@ async function loadBudget(projectId, sym) {
     }
 
     const t = d.totals;
+    const mode = d.quantityTracking ? budgetView() : 'cost';
+    const showCost = mode !== 'qty', showQty = mode !== 'cost';
+    if (!showCost) {
+      const tracked = d.rows.filter(r => r.BudgetQty !== null && r.BudgetQty !== undefined);
+      document.getElementById('budgetTotals').innerHTML = `
+        <div class="stat-grid" style="padding:16px 16px 0">
+          ${[['Tracked by quantity', String(tracked.length), `of ${d.rows.length} line(s)`],
+             ['Fully purchased', String(tracked.filter(r => r.ToBuyQty === 0).length), 'nothing left to buy'],
+             ['Still to buy', String(tracked.filter(r => r.ToBuyQty > 0).length), 'line(s) short of requirement'],
+             ['Bought over requirement', String(tracked.filter(r => r.OverBoughtQty > 0).length), 'line(s)'],
+             ['Awaiting delivery', String(d.rows.filter(r => r.ToReceiveQty > 0).length), 'line(s) with quantity due']]
+            .map(x => `<div class="stat"><div class="stat-label">${UI.esc(x[0])}</div>
+              <div class="stat-value">${UI.esc(x[1])}</div><div class="stat-note">${UI.esc(x[2])}</div>
+              <div class="stat-accent"></div></div>`).join('')}
+        </div>`;
+    } else
     document.getElementById('budgetTotals').innerHTML = `
       <div class="stat-grid" style="padding:16px 16px 0">
         ${[['Revised budget', UI.fmt.money(t.revisedBudget, sym), `Original ${UI.fmt.money(t.originalBudget, sym)}`],
@@ -4347,7 +4369,8 @@ async function loadBudget(projectId, sym) {
           `<span class="mono"><strong>${UI.esc(r.CostCode)}</strong></span><br>
            <span class="muted">${UI.esc(r.Category)}</span>` },
         { key: 'Description', label: 'Description' },
-        ...(d.quantityTracking ? budgetQtyColumns() : []),
+        ...(d.quantityTracking && showQty ? budgetQtyColumns() : []),
+      ].concat(showCost ? [
         { key: 'RevisedBudget', label: 'Budget', align: 'right', render: r =>
           r.RevisedBudget !== r.OriginalBudget
             ? `${UI.fmt.number(r.RevisedBudget)}<br><span class="muted">was ${UI.fmt.number(r.OriginalBudget)}</span>`
@@ -4361,12 +4384,13 @@ async function loadBudget(projectId, sym) {
         { key: 'Utilisation', label: 'Used', align: 'right', render: r =>
           `<div style="min-width:90px">${UI.fmt.percent(r.Utilisation)}
              <div class="progress mt-8"><div style="width:${Math.min(100, r.Utilisation)}%;
-               background:${r.IsOverBudget ? 'var(--red-600)' : 'var(--accent)'}"></div></div></div>` },
+               background:${r.IsOverBudget ? 'var(--red-600)' : 'var(--accent)'}"></div></div></div>` }
+      ] : []).concat([
         ...(d.canEdit ? [{ key: 'actions', label: '', align: 'right', render: r =>
           `<div class="row-actions">
              <button class="btn btn-sm" data-edit="${UI.esc(r.BudgetID)}">Edit</button>
              <button class="btn btn-sm btn-danger" data-del="${UI.esc(r.BudgetID)}">Delete</button></div>` }] : [])
-      ],
+      ]),
       rows: d.rows,
       empty: UI.emptyState('No budget lines', 'Add cost codes, or import the budget from a CSV.')
     });
@@ -4448,6 +4472,13 @@ function openBudgetForm(projectId, existing, sym, withQty) {
 }
 
 /* ---------------------------------------- BUDGET QUANTITIES (9 Nov 2026) */
+
+/** How the budget tab tracks: 'both', 'cost' or 'qty' — remembered in this browser. */
+function budgetView() {
+  let v = 'both';
+  try { v = localStorage.getItem('pms_budget_view') || 'both'; } catch (e) {}
+  return ['both', 'cost', 'qty'].indexOf(v) === -1 ? 'both' : v;
+}
 
 /** Required, purchased, received, issued and still to buy, for a budget line. */
 function budgetQtyColumns() {
