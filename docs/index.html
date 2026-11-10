@@ -15576,6 +15576,27 @@ async function printRecord(kind, recordId, options) {
  * words, a cash report has a reconciliation, an RFQ has what is being asked
  * for and who is being asked. Anything else falls back to the field list.
  */
+/**
+ * The approval history on a printed document, as the purchase order prints
+ * it (owner's request, 10 Nov 2026): when, which step, who in what role, and
+ * what they said. No email addresses.
+ */
+function printApprovalHistory(list) {
+  if (!list || !list.length) return '';
+  const step = a => String(a.Action || '').replace(/_/g, ' ').toLowerCase().replace(/^./, c => c.toUpperCase());
+  return `
+    <h3 style="margin-top:14px">Approval history and comments</h3>
+    <table>
+      <thead><tr><th style="width:90px">Date</th><th style="width:120px">Step</th><th style="width:200px">By</th><th>Comments</th></tr></thead>
+      <tbody>${list.map(a => `<tr>
+        <td style="white-space:nowrap">${UI.esc(a.ActionAt ? UI.fmt.date(a.ActionAt) : '')}</td>
+        <td>${UI.esc(step(a))}${a.StatusAfter ? '<br><small>' + UI.esc(a.StatusAfter) + '</small>' : ''}</td>
+        <td>${UI.esc(a.UserName || '')}${a.Role ? '<br><small>' + UI.esc(String(a.Role).replace(/_/g, ' ')) + '</small>' : ''}</td>
+        <td style="white-space:pre-wrap">${a.Comments ? UI.esc(a.Comments) : '<span class="muted">—</span>'}</td>
+      </tr>`).join('')}</tbody>
+    </table>`;
+}
+
 const PRINT_BODIES = {
 
   RFQ(p) {
@@ -15745,7 +15766,8 @@ const PRINT_BODIES = {
         ${paid ? `<tr><td>Paid to date</td><td class="r">${money(paid)}</td></tr>
                   <tr class="total"><td>Outstanding</td><td class="r">${money(d.outstanding)}</td></tr>` : ''}
       </table>
-      <p style="margin-top:14px"><strong>Net payable in words:</strong> ${UI.esc(amountInWords(b.NetPayable))}</p>`;
+      <p style="margin-top:14px"><strong>Net payable in words:</strong> ${UI.esc(amountInWords(b.NetPayable))}</p>
+      ${printApprovalHistory(d.approvals)}`;
   },
 
   VENDORPAY(p) {
