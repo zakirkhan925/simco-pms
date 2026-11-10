@@ -8535,6 +8535,11 @@ async function openItemForm(existing, onSaved) {
     { name: 'StandardRate', label: 'Standard rate', type: 'number', value: 0 },
     { name: 'Specification', label: 'Specification', type: 'textarea', span: 2 }
   ];
+  // Active or Inactive, on an existing item (owner's request, 10 Nov 2026).
+  if (existing) {
+    fields.splice(6, 0, { name: 'Status', label: 'Status', type: 'select', options: ['Active', 'Inactive'],
+      hint: 'Inactive: no longer offered for receipts, issues or transfers. History is kept.' });
+  }
   const body = UI.el('div');
   const form = UI.form(fields, existing || {});
   body.appendChild(form);
@@ -8550,7 +8555,8 @@ async function openItemForm(existing, onSaved) {
           const res = existing
             ? await api('updateStockItem', existing.ItemID, data)
             : await api('createStockItem', data);
-          m.close(); UI.success('Saved', res.message);
+          m.close();
+          if (/still holds/.test(res.message)) UI.warn('Saved — note the stock', res.message); else UI.success('Saved', res.message);
           if (typeof onSaved === 'function') onSaved();
           else navigate('stock');
         } catch (e) { UI.error('Could not save the item', e.message); }
