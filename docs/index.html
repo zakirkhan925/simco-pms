@@ -14755,7 +14755,7 @@ PAGES['salary-sheet'] = (root, id) => payrollSheetPage(root, PAYROLL.salary, id)
 
   <script>
 /* ==========================================================================
- * CDR & Guarantees Recovery (owner's request, 11 Nov 2026).
+ * Security Instruments (owner's request, 11 Nov 2026; first named CDR & Guarantees Recovery).
  *
  * A module of its own for Head Office Accounts and Management: the register
  * of CDRs, bank guarantees, performance bonds and insurance guarantees, and
@@ -14796,7 +14796,7 @@ function bgmWireLinks(root) {
       const a = r && r.data;
       if (!a || !a.level) return;
       App.bgm = a;
-      if (NAV.some(g => g.group === 'CDR & Guarantees')) return;
+      if (NAV.some(g => g.group === 'Security Instruments')) return;
       const items = [
         { id: 'bgm-dashboard', label: 'Recovery Dashboard', icon: '⛨', phase: 15, perm: 'bgm.view' },
         { id: 'bgm-register', label: 'Instrument Register', icon: '☰', phase: 15, perm: 'bgm.view' },
@@ -14805,7 +14805,7 @@ function bgmWireLinks(root) {
       if (a.canManageAccess) items.push({ id: 'bgm-access', label: 'Module Access', icon: '⚿', phase: 15, perm: 'bgm.view' });
       if (App.permissions.indexOf('bgm.view') === -1) App.permissions.push('bgm.view');
       const admin = NAV.findIndex(g => g.group === 'Administration');
-      NAV.splice(admin === -1 ? NAV.length : admin, 0, { group: 'CDR & Guarantees', items });
+      NAV.splice(admin === -1 ? NAV.length : admin, 0, { group: 'Security Instruments', items });
       renderNav();
     }).catch(() => {});
   };
@@ -14860,7 +14860,7 @@ function bgmFilterBar(host, meta, onApply) {
 /* ----------------------------------------------------------- DASHBOARD */
 
 async function pageBgmDashboard(root) {
-  root.innerHTML = pageHead('CDR & Guarantees', 'Recovery of CDRs, bank guarantees, performance bonds and insurance guarantees',
+  root.innerHTML = pageHead('Security Instruments', 'Recovery of CDRs, bank guarantees, performance bonds and insurance guarantees',
     `<button class="btn btn-primary hidden" id="bgmNew">+ Register instrument</button>`) +
     `<div class="card"><div class="card-head"><div class="filters" id="bgmFilters"></div></div></div>
      <div id="bgmDash" class="mt-16">${UI.loadingState()}</div>`;
@@ -15670,7 +15670,7 @@ function bgmPrintReport(d) {
 /* -------------------------------------------------------------- ACCESS */
 
 async function pageBgmAccess(root) {
-  root.innerHTML = pageHead('Module Access', 'Who may use CDR & Guarantees, and at what level. No role or permission changes.') +
+  root.innerHTML = pageHead('Module Access', 'Who may use Security Instruments, and at what level. No role or permission changes.') +
     `<div class="card"><div class="card-body muted" style="font-size:13px">
        <strong>HO Accounts</strong>: registers instruments, records steps, refunds and follow-ups, closes.
        <strong>CFO</strong>: sees everything; authorises adjustments to the refundable amount; reopens a closed record.
@@ -15685,7 +15685,7 @@ async function pageBgmAccess(root) {
       { key: 'Name', label: 'User', render: u => `<strong>${UI.esc(u.Name)}</strong><br><span class="muted" style="font-size:12px">${UI.esc(u.Email)}</span>` },
       { key: 'Role', label: 'PMS role (unchanged)' },
       { key: 'UserStatus', label: 'Account' },
-      { key: 'Level', label: 'CDR & Guarantees access', render: u => u.Role === 'ADMIN' ? '<span class="muted">Full (administrator)</span>'
+      { key: 'Level', label: 'Security Instruments access', render: u => u.Role === 'ADMIN' ? '<span class="muted">Full (administrator)</span>'
           : `<select class="input" data-acc="${UI.esc(u.UserID)}" style="max-width:200px">${opts(u.Level)}</select>` }
     ],
     rows: d.users
@@ -17553,7 +17553,7 @@ PAGES['notifications'] = pageNotifications;
     12: { name: 'Audit, Notifications, Security, Performance hardening', done: true },
     13: { name: 'Working cash advances and site imprest', done: true },
     14: { name: 'Labour and salaries', done: true },
-    15: { name: 'CDR & Guarantees Recovery', done: true }
+    15: { name: 'Security Instruments', done: true }
   };
 
   /**

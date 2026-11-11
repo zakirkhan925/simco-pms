@@ -31,7 +31,7 @@
     12: { name: 'Audit, Notifications, Security, Performance hardening', done: true },
     13: { name: 'Working cash advances and site imprest', done: true },
     14: { name: 'Labour and salaries', done: true },
-    15: { name: 'CDR & Guarantees Recovery', done: true }
+    15: { name: 'Security Instruments', done: true }
   };
 
   /**
