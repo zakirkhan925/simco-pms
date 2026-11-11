@@ -14799,7 +14799,8 @@ function bgmWireLinks(root) {
       if (NAV.some(g => g.group === 'CDR & Guarantees')) return;
       const items = [
         { id: 'bgm-dashboard', label: 'Recovery Dashboard', icon: '⛨', phase: 15, perm: 'bgm.view' },
-        { id: 'bgm-register', label: 'Instrument Register', icon: '☰', phase: 15, perm: 'bgm.view' }
+        { id: 'bgm-register', label: 'Instrument Register', icon: '☰', phase: 15, perm: 'bgm.view' },
+        { id: 'bgm-reports', label: 'Recovery Reports', icon: '◳', phase: 15, perm: 'bgm.view' }
       ];
       if (a.canManageAccess) items.push({ id: 'bgm-access', label: 'Module Access', icon: '⚿', phase: 15, perm: 'bgm.view' });
       if (App.permissions.indexOf('bgm.view') === -1) App.permissions.push('bgm.view');
@@ -14882,7 +14883,8 @@ async function pageBgmDashboard(root) {
       ['Pending recovery: due now and not yet back', 'PendingRecovery'],
       ['Outstanding recoverable: everything still to come back', 'Outstanding'],
       ['Recovered to date', 'Recovered'],
-      ['Charges paid (bank, insurance, renewal, other)', 'Charges']
+      ['Charges paid (bank, insurance, renewal, other)', 'Charges'],
+      ['Undated security cheques still with banks / insurers', 'ChequesHeldAmount']
     ];
     host.innerHTML = `
       ${d.over90 ? `<div class="card" style="border-left:4px solid var(--over);padding:12px 16px;margin-bottom:16px">
@@ -14904,6 +14906,7 @@ async function pageBgmDashboard(root) {
             s['Partially Recovered'] + ' partly recovered')}
           ${statTileBgm('Fully recovered', String(s['Recovered']), 'ready to close')}
           ${statTileBgm('Closed', String(s['Closed']), 'verified and closed')}
+          ${statTileBgm('Undated cheques held', String(d.totals.reduce((n, t) => n + t.ChequesHeld, 0)), 'with banks / insurers')}
         </div></div>
       <div class="card mt-16"><div class="card-head"><div class="card-title">Money</div>
         <span class="muted" style="font-size:12px">Exposure is what the instruments guarantee. Only margins and deposits are cash to recover.</span></div>
@@ -14999,7 +15002,8 @@ async function pageBgmRegister(root) {
     { key: 'Recovered', label: 'Recovered', align: 'right', render: r => bgmMoney(r.Recovered, r.Currency) },
     { key: 'Outstanding', label: 'Outstanding', align: 'right', render: r => `<strong>${bgmMoney(r.Outstanding, r.Currency)}</strong>` },
     { key: 'RecoveryStatus', label: 'Status', render: r => UI.badge(r.RecoveryStatus, BGM_TONE[r.RecoveryStatus]) +
-        (r.DaysOutstanding ? `<br><span class="muted" style="font-size:12px">${r.DaysOutstanding} days overdue</span>` : '') }
+        (r.DaysOutstanding ? `<br><span class="muted" style="font-size:12px">${r.DaysOutstanding} days overdue</span>` : '') +
+        (r.ChequesHeld ? `<br><span style="font-size:12px;color:var(--over)">undated cheque held</span>` : '') }
   ];
   const load = async () => {
     const host = document.getElementById('bgmList');
@@ -15028,6 +15032,8 @@ const BGM_EXPORT_COLS = [
   ['RecoveryStatus', 'Recovery status'], ['ReleaseRequestedOn', 'Release requested'], ['OriginalReturnedOn', 'Original returned'],
   ['CancellationConfirmedOn', 'Cancellation confirmed'], ['DueDate', 'Recovery due since'], ['DaysOutstanding', 'Days outstanding'],
   ['Ageing', 'Ageing'], ['LastFollowupDate', 'Last follow-up'], ['NextFollowupDate', 'Next follow-up'],
+  ['CdrAmountPaid', 'CDR cheque paid'], ['MarginPaid', 'Margin paid'], ['PremiumPaid', 'Premium paid'],
+  ['ChequesHeld', 'Undated cheques held'], ['ChequesHeldAmount', 'Undated cheque amount held'],
   ['ResponsibleName', 'Responsible'], ['DelayReason', 'Reason for delay'], ['DocumentRef', 'Document reference'], ['Remarks', 'Remarks']
 ];
 
@@ -15080,6 +15086,7 @@ async function pageBgmInstrument(root, id) {
     a.canEdit && open ? btn('bgmEdit', 'Edit') : '',
     a.canEdit && open && freeSteps.length ? btn('bgmStep', 'Record a step') : '',
     a.canEdit && open && i.Outstanding > 0 ? btn('bgmRefund', 'Record refund', 'btn-primary') : '',
+    a.canEdit && open ? btn('bgmPay', 'Record cheque / payment') : '',
     a.canEdit && open ? btn('bgmFollow', 'Add follow-up') : '',
     a.canAdjust && open ? btn('bgmAdjust', 'Adjust refundable') : '',
     a.canEdit && i.RecoveryStatus === 'Recovered' ? btn('bgmClose', 'Close', 'btn-primary') : '',
@@ -15103,6 +15110,10 @@ async function pageBgmInstrument(root, id) {
           <dt>Refundable</dt><dd>${m(i.Refundable)}${i.Adjustments ? ` <span class="muted">incl. adjustments ${m(i.Adjustments)}</span>` : ''}</dd>
           <dt>Recovered</dt><dd>${m(i.Recovered)}</dd>
           <dt>Outstanding</dt><dd><strong style="font-size:15px">${m(i.Outstanding)}</strong></dd>
+          ${i.ChequesHeld ? `<dt>Undated cheque held</dt><dd><strong style="color:var(--over)">${m(i.ChequesHeldAmount)}</strong>
+            <span class="muted">with ${UI.esc(i.Issuer)}: must come back</span></dd>` : ''}
+          <dt>Paid to obtain it</dt><dd>${isCdr ? 'CDR cheque ' + m(i.CdrAmountPaid)
+            : 'margin ' + m(i.MarginPaid) + ' · premium ' + m(i.PremiumPaid)}</dd>
           <dt>Charges</dt><dd>${m(i.TotalCharges)} <span class="muted">bank ${UI.fmt.money(i.BankCharges)} · insurance ${UI.fmt.money(i.InsuranceCharges)} ·
             renewal ${UI.fmt.money(i.RenewalCharges)} · other ${UI.fmt.money(i.OtherExpenses)}</span></dd>
         </dl></div></div>
@@ -15122,6 +15133,9 @@ async function pageBgmInstrument(root, id) {
           <dt>Remarks</dt><dd>${UI.esc(i.Remarks || '—')}</dd>
         </dl></div></div>
     </div>
+    <div class="card mt-16"><div class="card-head"><div class="card-title">Cheques and payments given to obtain it</div>
+      <span class="muted" style="font-size:12px">${isCdr ? 'the cheque given to the bank for the CDR'
+        : 'undated security cheque for the guarantee amount, cash margin, premium'}</span></div><div id="bgmPays"></div></div>
     <div class="card mt-16"><div class="card-head"><div class="card-title">Recovery steps</div>
       <span class="muted" style="font-size:12px">${isCdr ? 'CDR returned and refund received are separate steps'
         : 'original returned, cancellation confirmed and margin refunded are separate steps'}</span></div>
@@ -15135,6 +15149,29 @@ async function pageBgmInstrument(root, id) {
 
   const reversed = r => r.ReversedAt ? ` <span class="muted">reversed by ${UI.esc(r.ReversedByName)}: ${UI.esc(r.ReversalReason)}</span>` : '';
   const strike = (r, html) => r.ReversedAt ? `<s class="muted">${html}</s>` : html;
+  UI.table(document.getElementById('bgmPays'), {
+    columns: [
+      { key: 'PurposeName', label: 'For', render: x => strike(x, UI.esc(x.PurposeName)) + reversed(x) },
+      { key: 'Method', label: 'How', render: x => strike(x, UI.esc(x.Method)) },
+      { key: 'ChequeNo', label: 'Cheque / reference', render: x => strike(x, UI.esc(x.ChequeNo)) },
+      { key: 'DrawnOnBank', label: 'Drawn on', render: x => UI.esc([x.DrawnOnBank, x.AccountNo].filter(Boolean).join(' · ')) },
+      { key: 'ChequeDate', label: 'Cheque date', render: x => x.Purpose === 'SECURITY_CHEQUE' && !x.ChequeDate
+          ? '<span class="muted">undated</span>' : bgmDate(x.ChequeDate) },
+      { key: 'PaymentDate', label: 'Given on', render: x => bgmDate(x.PaymentDate) },
+      { key: 'Amount', label: 'Amount', align: 'right', render: x => strike(x, m(x.Amount)) },
+      { key: 'PaidTo', label: 'Given to' },
+      { key: 'ReturnedOn', label: 'Returned', render: x => x.Purpose !== 'SECURITY_CHEQUE' || x.ReversedAt ? ''
+          : x.ReturnedOn ? `${bgmDate(x.ReturnedOn)}<br><span class="muted" style="font-size:12px">${UI.esc(x.ReturnedByName)}${x.ReturnRemarks ? ': ' + UI.esc(x.ReturnRemarks) : ''}</span>`
+          : UI.badge('Held by ' + (x.PaidTo || 'bank'), 'red') },
+      { key: 'x', label: '', render: x => !a.canEdit || !open || x.ReversedAt ? '' :
+          (x.Purpose === 'SECURITY_CHEQUE' && !x.ReturnedOn
+            ? `<button class="btn btn-sm" data-ret-pay="${UI.esc(x.PaymentID)}">Mark returned</button> ` : '') +
+          `<button class="btn btn-sm btn-ghost" data-rev-pay="${UI.esc(x.PaymentID)}">Reverse</button>` }
+    ],
+    rows: d.payments,
+    empty: UI.emptyState('Nothing recorded', isCdr ? 'Record the cheque given to the bank for this CDR.'
+      : 'Record the undated cheque for the guarantee amount, the cash margin and the premium, each as it was given.')
+  });
   UI.table(document.getElementById('bgmSteps'), {
     columns: [
       { key: 'EventDate', label: 'Date', render: e => strike(e, bgmDate(e.EventDate)) },
@@ -15193,6 +15230,10 @@ async function pageBgmInstrument(root, id) {
   on('bgmRefund', () => bgmRecoveryDialog(i, 'RECEIPT', reload));
   on('bgmAdjust', () => bgmRecoveryDialog(i, 'ADJUSTMENT', reload));
   on('bgmFollow', () => bgmFollowupDialog(i, reload));
+  on('bgmPay', () => bgmPaymentDialog(i, reload));
+  root.querySelectorAll('[data-ret-pay]').forEach(b => { b.onclick = () => bgmChequeReturnDialog(b.dataset.retPay, reload); });
+  root.querySelectorAll('[data-rev-pay]').forEach(b => { b.onclick = () => bgmReasonDialog('Reverse this entry', 'Why it is being reversed',
+    'Reverse', true, r => api('bgmReversePayment', b.dataset.revPay, r), reload, true); });
   on('bgmClose', () => bgmReasonDialog('Close ' + i.InstrumentID, 'Verification note (for example: refund agreed to bank statement)',
     'Close', false, r => api('bgmCloseInstrument', i.InstrumentID, r), reload));
   on('bgmReopen', () => bgmReasonDialog('Reopen ' + i.InstrumentID, 'Why it is being reopened', 'Reopen', true,
@@ -15384,6 +15425,83 @@ function bgmRecoveryDialog(i, kind, onDone) {
   });
 }
 
+function bgmPaymentDialog(i, onDone) {
+  const meta = bgmState.meta;
+  const isCdr = i.Category === 'CDR';
+  const purposes = Object.keys(meta.paymentPurposes).filter(k => isCdr
+    ? ['CDR_AMOUNT', 'PREMIUM', 'OTHER'].indexOf(k) !== -1 : k !== 'CDR_AMOUNT');
+  const suggest = p => p === 'CDR_AMOUNT' ? i.FaceValue : p === 'SECURITY_CHEQUE' ? i.FaceValue : p === 'CASH_MARGIN' ? i.CashMargin : '';
+  const body = UI.el('div');
+  let form = null, fields;
+  const build = () => {
+    const keep = form ? UI.readForm(form) : { Purpose: purposes[0], Method: 'Cheque', Amount: suggest(purposes[0]), PaidTo: i.Issuer, PaymentDate: meta.today };
+    const purpose = keep.Purpose, method = purpose === 'SECURITY_CHEQUE' ? 'Cheque' : keep.Method;
+    keep.Method = method;
+    const transfer = method === 'Bank transfer';
+    fields = [
+      { name: 'Purpose', label: 'What it was for', type: 'select', required: true,
+        options: purposes.map(k => ({ value: k, label: meta.paymentPurposes[k] })) },
+      { name: 'Method', label: 'How', type: 'select', required: true, readonly: purpose === 'SECURITY_CHEQUE', options: meta.paymentMethods },
+      { name: 'ChequeNo', label: transfer ? 'Transaction reference' : method === 'Pay order' ? 'Pay order number' : 'Cheque number', required: true },
+      { name: 'DrawnOnBank', label: transfer ? 'From SIMCO bank' : 'Drawn on (SIMCO bank)' },
+      { name: 'AccountNo', label: 'SIMCO account number' },
+      transfer ? null : { name: 'ChequeDate', label: 'Date written on the cheque', type: 'date',
+        hint: purpose === 'SECURITY_CHEQUE' ? 'Leave blank: the security cheque is undated.' : '' },
+      { name: 'PaymentDate', label: transfer ? 'Date transferred' : 'Date handed over', type: 'date', required: true },
+      { name: 'Amount', label: 'Amount (' + i.Currency + ')', type: 'number', required: true },
+      { name: 'PaidTo', label: 'Given to', hint: 'The bank or insurance company holding it.' },
+      { name: 'Remarks', label: 'Remarks', type: 'textarea', span: 2 }
+    ].filter(Boolean);
+    const nf = UI.form(fields, keep);
+    body.innerHTML = '';
+    body.appendChild(nf);
+    form = nf;
+    form.querySelectorAll('input[type="number"]').forEach(n => { n.step = 'any'; n.min = '0'; });
+    form.querySelector('[name="Purpose"]').onchange = e => {
+      const amt = form.querySelector('[name="Amount"]');
+      amt.value = suggest(e.target.value);
+      build();
+    };
+    form.querySelector('[name="Method"]').onchange = build;
+  };
+  build();
+  UI.modal({
+    title: 'Record cheque / payment · ' + i.InstrumentID, body, size: 'wide',
+    footer: [
+      { label: 'Cancel', onClick: mm => mm.close() },
+      { label: 'Record', class: 'btn-primary', onClick: async mm => {
+          const data = UI.validate(form, fields);
+          if (!data) return;
+          if (data.Purpose === 'SECURITY_CHEQUE') data.Method = 'Cheque';
+          mm.busy(true);
+          try { const r = await api('bgmRecordPayment', i.InstrumentID, data); UI.success(r.message); mm.close(); onDone(); }
+          catch (e) { mm.busy(false); UI.error('Not recorded', e.message); }
+        } }
+    ]
+  });
+}
+
+function bgmChequeReturnDialog(paymentId, onDone) {
+  const fields = [
+    { name: 'ReturnedOn', label: 'Date it came back', type: 'date', required: true, value: bgmState.meta.today },
+    { name: 'Remarks', label: 'Remarks', type: 'textarea', span: 2, placeholder: 'For example: collected from the branch with the cancellation letter' }
+  ];
+  const form = UI.form(fields);
+  UI.modal({
+    title: 'Security cheque returned', body: form, size: 'narrow',
+    footer: [
+      { label: 'Cancel', onClick: mm => mm.close() },
+      { label: 'Record', class: 'btn-primary', onClick: async mm => {
+          const data = UI.validate(form, fields);
+          if (!data) return;
+          mm.busy(true);
+          try { const r = await api('bgmReturnCheque', paymentId, data); UI.success(r.message); mm.close(); onDone(); }
+          catch (e) { mm.busy(false); UI.error('Not recorded', e.message); }
+        } }
+    ]
+  });
+}
+
 function bgmFollowupDialog(i, onDone) {
   const meta = bgmState.meta;
   const users = meta.users.filter(u => u.Level === 'HO_ACCOUNTS' || u.UserID === App.user.UserID || u.UserID === i.ResponsibleUserID);
@@ -15433,6 +15551,122 @@ function bgmReasonDialog(title, label, action, required, fn, onDone, danger) {
   });
 }
 
+/* ------------------------------------------------------------- REPORTS */
+
+const bgmRep = { id: 'REGISTER', period: {}, includeVoid: false };
+
+async function pageBgmReports(root, id) {
+  if (id) bgmRep.id = id;
+  root.innerHTML = pageHead('Recovery Reports', 'Sixteen views of the same records the dashboard uses',
+    `<button class="btn" id="bgmRepCsv">Export to Excel</button> <button class="btn" id="bgmRepPrint">Print / PDF</button>`) +
+    `<div class="report-layout" style="display:grid;grid-template-columns:270px minmax(0,1fr);gap:16px;align-items:start">
+       <div class="card" id="bgmRepList" style="padding:6px 0"></div>
+       <div style="min-width:0">
+         <div class="card"><div class="card-head"><div class="filters" id="bgmFilters"></div></div>
+           <div class="card-head hidden" id="bgmRepExtra" style="border-bottom:0"></div></div>
+         <div class="card mt-16"><div class="card-head"><div><div class="card-title" id="bgmRepTitle"></div>
+           <div class="muted" style="font-size:12px" id="bgmRepNote"></div></div></div>
+           <div id="bgmRepBody">${UI.loadingState()}</div><div id="bgmRepTotals"></div></div>
+         <div class="card mt-16 hidden" id="bgmRepSumCard"><div class="card-head"><div class="card-title" id="bgmRepSumTitle"></div></div>
+           <div id="bgmRepSum"></div></div>
+       </div></div>`;
+  let meta;
+  try { meta = await bgmLoadMeta(true); } catch (e) { document.getElementById('bgmRepBody').innerHTML = UI.errorState(e.message); return; }
+  const list = document.getElementById('bgmRepList');
+  list.innerHTML = meta.reports.map((r, n) => {
+    const on = r.id === bgmRep.id;
+    return `<button data-rep="${r.id}" style="display:block;width:100%;text-align:left;border:0;cursor:pointer;padding:8px 14px;
+      font:inherit;font-size:13px;background:${on ? 'var(--navy-soft)' : 'none'};color:${on ? 'var(--navy)' : 'inherit'};
+      font-weight:${on ? 650 : 450}">${n + 1}. ${UI.esc(r.title)}</button>`;
+  }).join('');
+  list.querySelectorAll('[data-rep]').forEach(b => { b.onclick = () => { bgmRep.id = b.dataset.rep; pageBgmReports(root); }; });
+  let last = null;
+  const extra = document.getElementById('bgmRepExtra');
+  const filters = exp => Object.assign({}, bgmState.filters, {
+    periodFrom: bgmRep.period.from || '', periodTo: bgmRep.period.to || '', includeVoid: bgmRep.includeVoid, export: !!exp });
+  const load = async () => {
+    const host = document.getElementById('bgmRepBody');
+    host.innerHTML = UI.loadingState();
+    try { last = (await api('bgmRunReport', bgmRep.id, filters(false))).data; } catch (e) { host.innerHTML = UI.errorState(e.message); return; }
+    document.getElementById('bgmRepTitle').textContent = last.title;
+    document.getElementById('bgmRepNote').textContent = last.note + (last.period ? '  Period ' + last.period.from + ' to ' + last.period.to + '.' : '');
+    UI.table(host, { columns: bgmRepColumns(last.columns), rows: last.rows,
+      empty: UI.emptyState('Nothing to report', 'No instrument matches this report and the filters.') });
+    document.getElementById('bgmRepTotals').innerHTML = bgmRepTotalsHtml(last);
+    const sc = document.getElementById('bgmRepSumCard');
+    sc.classList.toggle('hidden', !last.summary);
+    if (last.summary) {
+      document.getElementById('bgmRepSumTitle').textContent = last.summary.title;
+      UI.table(document.getElementById('bgmRepSum'), { columns: bgmRepColumns(last.summary.columns), rows: last.summary.rows });
+    }
+    bgmWireLinks(host);
+  };
+  if (bgmRep.id === 'RECOVERED_PERIOD') {
+    extra.innerHTML = `<div class="filters">
+      <div class="field"><label for="bgmPFrom">Received from</label><input class="input" type="date" id="bgmPFrom" value="${UI.esc(bgmRep.period.from || '')}"></div>
+      <div class="field"><label for="bgmPTo">Received to</label><input class="input" type="date" id="bgmPTo" value="${UI.esc(bgmRep.period.to || '')}"></div>
+      <div class="field muted" style="align-self:end;font-size:12px">Left blank: this month.</div></div>`;
+    ['bgmPFrom', 'bgmPTo'].forEach(i => { document.getElementById(i).onchange = () => {
+      bgmRep.period = { from: document.getElementById('bgmPFrom').value, to: document.getElementById('bgmPTo').value }; load(); }; });
+  } else if (bgmRep.id === 'REGISTER' || bgmRep.id === 'PROJECT') {
+    extra.innerHTML = `<label class="checkbox"><input type="checkbox" id="bgmVoid"${bgmRep.includeVoid ? ' checked' : ''}> Include void records</label>`;
+    document.getElementById('bgmVoid').onchange = e => { bgmRep.includeVoid = e.target.checked; load(); };
+  }
+  extra.classList.toggle('hidden', !extra.innerHTML);
+  document.getElementById('bgmRepCsv').onclick = async () => {
+    try {
+      // Asked of the server again with export set, so the export is in the audit log.
+      const d = (await api('bgmRunReport', bgmRep.id, filters(true))).data;
+      bgmCsv(d.title, d.rows, d.columns.map(c => [c.key, c.label]));
+    } catch (e) { UI.error('Not exported', e.message); }
+  };
+  document.getElementById('bgmRepPrint').onclick = () => last && bgmPrintReport(last);
+  bgmFilterBar(document.getElementById('bgmFilters'), meta, load);
+  await load();
+}
+
+function bgmRepCell(c, r) {
+  const v = r[c.key];
+  if (c.key === 'InstrumentID' && v) return bgmLink(v);
+  if (c.key === 'RecoveryStatus' && v) return UI.badge(v, BGM_TONE[v]);
+  if (c.type === 'money') return v === undefined || v === null || v === '' ? '' : bgmMoney(v, r.Currency);
+  if (c.type === 'date') return bgmDate(v);
+  if (c.type === 'int') return v ? (c.key === 'DaysOutstanding' && v > 90 ? `<strong style="color:var(--over)">${v}</strong>` : String(v)) : '';
+  return UI.esc(v === null || v === undefined ? '' : v);
+}
+const bgmRepColumns = cols => cols.map(c => ({ key: c.key, label: c.label,
+  align: c.type === 'money' || c.type === 'int' ? 'right' : '', render: r => bgmRepCell(c, r) }));
+
+function bgmRepTotalsHtml(d) {
+  const money = d.columns.filter(c => c.type === 'money');
+  if (!d.totals.length) return '';
+  return `<div style="padding:12px 16px" class="muted">` + d.totals.map(t =>
+    `<strong>${UI.esc(t.Currency)}</strong> · ${t.Rows} row${t.Rows === 1 ? '' : 's'}` +
+    money.map(c => ` · ${UI.esc(c.label)} <strong>${UI.fmt.money(t[c.key])}</strong>`).join('')).join('<br>') + `</div>`;
+}
+
+function bgmPrintReport(d) {
+  const f = bgmState.filters;
+  const meta = Object.keys(f).filter(k => f[k]).map(k => k + ': ' + f[k]);
+  if (d.period) meta.unshift('Period ' + d.period.from + ' to ' + d.period.to);
+  const num = c => c.type === 'money' || c.type === 'int';
+  const cell = (c, r) => {
+    const v = r[c.key];
+    if (c.type === 'money') return v === undefined || v === null || v === '' ? '' : bgmMoney(v, r.Currency);
+    return UI.esc(v === null || v === undefined ? '' : v);
+  };
+  const table = (cols, rows) => `<table><thead><tr>${cols.map(c => `<th${num(c) ? ' class="r"' : ''}>${UI.esc(c.label)}</th>`).join('')}</tr></thead>
+    <tbody>${rows.map(r => `<tr>${cols.map(c => `<td${num(c) ? ' class="r"' : ''}>${cell(c, r)}</td>`).join('')}</tr>`).join('')}</tbody></table>`;
+  const money = d.columns.filter(c => c.type === 'money');
+  const totals = d.totals.map(t => `<p><strong>${UI.esc(t.Currency)}</strong>: ${t.Rows} rows` +
+    money.map(c => ` · ${UI.esc(c.label)} <strong>${UI.fmt.money(t[c.key])}</strong>`).join('') + `</p>`).join('');
+  const body = `<p class="muted">${UI.esc(d.note)}</p>` + (d.rows.length ? table(d.columns, d.rows) : '<p>Nothing to report.</p>') + totals +
+    (d.summary ? `<h3 style="font-size:12px;margin:16px 0 0">${UI.esc(d.summary.title)}</h3>` + table(d.summary.columns, d.summary.rows) : '');
+  UI.print.send(UI.print.page({ title: d.title, meta, body,
+    styles: UI.print.docStyles() + '@page{size:A4 landscape} body{font-size:10.5px} th,td{padding:4px 5px}',
+    signatures: ['Prepared by (HO Accounts)', 'Reviewed by (CFO)'] }));
+}
+
 /* -------------------------------------------------------------- ACCESS */
 
 async function pageBgmAccess(root) {
@@ -15466,10 +15700,13 @@ async function pageBgmAccess(root) {
   });
 }
 
+// The instrument page belongs to the register in the menu (added, nothing replaced).
+ROUTE_PARENTS['bgm-instrument'] = 'bgm-register';
 PAGES['bgm-dashboard'] = pageBgmDashboard;
 PAGES['bgm-register'] = pageBgmRegister;
 PAGES['bgm-instrument'] = pageBgmInstrument;
 PAGES['bgm-access'] = pageBgmAccess;
+PAGES['bgm-reports'] = pageBgmReports;
 </script>
 
   <script>
