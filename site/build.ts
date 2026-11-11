@@ -119,8 +119,17 @@ const included: string[] = [];
 // card this page replaces on pms.simcodevelopers.com: keep it out of search
 // engines, and an inline icon so no load asks for a favicon that is not there.
 page = once(page, '<title>SIMCO Construction PMS</title>',
-  `<meta name="viewport" content="width=device-width, initial-scale=1">\n` +
+  `<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">\n` +
   `  <meta name="robots" content="noindex,nofollow">\n` +
+  // Installable on a phone, opening full screen like an app (11 Nov 2026).
+  // The files are site/app/*, copied beside the page below.
+  `  <link rel="manifest" href="manifest.webmanifest">\n` +
+  `  <meta name="theme-color" content="#15325C">\n` +
+  `  <meta name="mobile-web-app-capable" content="yes">\n` +
+  `  <meta name="apple-mobile-web-app-capable" content="yes">\n` +
+  `  <meta name="apple-mobile-web-app-status-bar-style" content="default">\n` +
+  `  <meta name="apple-mobile-web-app-title" content="SIMCO PMS">\n` +
+  `  <link rel="apple-touch-icon" href="apple-touch-icon.png">\n` +
   `  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%2315325C'/%3E%3Ctext x='16' y='21' font-family='system-ui,sans-serif' font-size='13' font-weight='700' fill='%23fff' text-anchor='middle'%3ESC%3C/text%3E%3C/svg%3E">\n` +
   `  <title>${escapeHtml(APP_NAME)}</title>`,
   'Index.html title');
@@ -130,7 +139,11 @@ if (CHECKING_ONLY) {
   page = once(page, '</head>', `${NOTICE_CSS}\n</head>`, 'Index.html head end');
   page = once(page, '<body>\n', `<body>\n  ${NOTICE_HTML}\n`, 'Index.html body start');
 }
-page = once(page, '</body>', `<script>\n/* site/port.js, added by site/build.ts */\n${port}</script>\n</body>`,
+page = once(page, '</body>', `<script>\n/* site/port.js, added by site/build.ts */\n${port}</script>\n` +
+  `<script>\n/* The service worker (site/app/sw.js): installable, stores nothing. */\n` +
+  `if ('serviceWorker' in navigator && window.isSecureContext) {\n` +
+  `  window.addEventListener('load', () => navigator.serviceWorker.register('sw.js').catch(() => {}));\n` +
+  `}\n</script>\n</body>`,
   'Index.html body end');
 
 page = page.replace(/<\?!=\s*include\('([A-Za-z]+)'\);?\s*\?>/g, (_m, name: string) => {
@@ -153,6 +166,16 @@ if (leftover) fail(`a template scriptlet is left in the output: ${leftover[0]}`)
 
 Deno.mkdirSync(OUT_DIR, { recursive: true });
 Deno.writeTextFileSync(new URL('index.html', OUT_DIR), page);
+// The app files (manifest, service worker, icons) go beside the page; publish
+// them to docs/ with it.
+const APP_DIR = new URL('app/', import.meta.url);
+const appFiles: string[] = [];
+for (const f of Deno.readDirSync(APP_DIR)) {
+  if (!f.isFile) continue;
+  Deno.copyFileSync(new URL(f.name, APP_DIR), new URL(f.name, OUT_DIR));
+  appFiles.push(f.name);
+}
+if (!appFiles.includes('manifest.webmanifest') || !appFiles.includes('sw.js')) fail('site/app/ is missing the manifest or sw.js');
 console.log(`site/dist/index.html: ${APP_NAME} ${APP_VERSION}, ` +
   `${included.length} partials (${included.join(', ')}; port.js after ${lastInclude}), ` +
   `${(page.length / 1024).toFixed(0)} KB`);

@@ -30,7 +30,8 @@
     11: { name: 'Bulk Import / Export, Templates and Documents', done: true },
     12: { name: 'Audit, Notifications, Security, Performance hardening', done: true },
     13: { name: 'Working cash advances and site imprest', done: true },
-    14: { name: 'Labour and salaries', done: true }
+    14: { name: 'Labour and salaries', done: true },
+    15: { name: 'CDR & Guarantees Recovery', done: true }
   };
 
   /**
@@ -70,6 +71,8 @@
     'cash-report': 'cash',
     'labour-sheet': 'labour',
     'salary-sheet': 'salaries',
+    // CDR & Guarantees (11 Nov 2026): its menu group appears only for people with access.
+    'bgm-instrument': 'bgm-register',
     report: 'reports',
     profile: null
   };

@@ -14754,6 +14754,725 @@ PAGES['salary-sheet'] = (root, id) => payrollSheetPage(root, PAYROLL.salary, id)
 </script>
 
   <script>
+/* ==========================================================================
+ * CDR & Guarantees Recovery (owner's request, 11 Nov 2026).
+ *
+ * A module of its own for Head Office Accounts and Management: the register
+ * of CDRs, bank guarantees, performance bonds and insurance guarantees, and
+ * the follow-up of each until what is refundable has come back.
+ *
+ * It adds to the app without changing it. Its menu group is added here, and
+ * only once the server says this person has access (the module keeps its
+ * own access list; no role or permission is involved). Every figure on these
+ * screens comes from the server, worked out from the records.
+ * ======================================================================== */
+
+const BGM_TONE = {
+  'Active': 'blue', 'Return Pending': 'amber', 'Expired – Recovery Required': 'red',
+  'Release Requested': 'violet', 'Cancellation Pending': 'amber', 'Refund Pending': 'amber',
+  'Partially Recovered': 'amber', 'Recovered': 'green', 'Closed': 'grey', 'Void': 'grey'
+};
+const BGM_ALERT_TONE = { danger: 'red', warn: 'amber', info: 'blue' };
+const bgmState = { filters: {}, meta: null };
+const bgmMoney = (v, cur) => (cur && cur !== 'PKR' ? cur + ' ' : '') + UI.fmt.money(v);
+const bgmDate = d => d ? `<span style="white-space:nowrap">${UI.esc(String(d).slice(0, 10))}</span>` : '<span class="muted">—</span>';
+const bgmLink = id => `<a href="#" class="link" style="white-space:nowrap" data-bgm="${UI.esc(id)}">${UI.esc(id)}</a>`;
+function bgmWireLinks(root) {
+  root.querySelectorAll('[data-bgm]').forEach(a => {
+    a.onclick = e => { e.preventDefault(); navigate('bgm-instrument', a.dataset.bgm); };
+  });
+}
+
+/* ------------------------------------------------------------ THE MENU */
+
+// Added, never in place of anything: the original adoptSession runs first and
+// unchanged. An older server without this module simply answers with an
+// error, and the menu group is never added.
+(function () {
+  const original = adoptSession;
+  adoptSession = function (data) {
+    original(data);
+    call('bgmMyAccess', App.token).then(r => {
+      const a = r && r.data;
+      if (!a || !a.level) return;
+      App.bgm = a;
+      if (NAV.some(g => g.group === 'CDR & Guarantees')) return;
+      const items = [
+        { id: 'bgm-dashboard', label: 'Recovery Dashboard', icon: '⛨', phase: 15, perm: 'bgm.view' },
+        { id: 'bgm-register', label: 'Instrument Register', icon: '☰', phase: 15, perm: 'bgm.view' }
+      ];
+      if (a.canManageAccess) items.push({ id: 'bgm-access', label: 'Module Access', icon: '⚿', phase: 15, perm: 'bgm.view' });
+      if (App.permissions.indexOf('bgm.view') === -1) App.permissions.push('bgm.view');
+      const admin = NAV.findIndex(g => g.group === 'Administration');
+      NAV.splice(admin === -1 ? NAV.length : admin, 0, { group: 'CDR & Guarantees', items });
+      renderNav();
+    }).catch(() => {});
+  };
+})();
+
+async function bgmLoadMeta(force) {
+  if (!bgmState.meta || force) bgmState.meta = (await api('bgmMeta')).data;
+  return bgmState.meta;
+}
+
+/* ------------------------------------------------------------- FILTERS */
+
+function bgmFilterBar(host, meta, onApply) {
+  const f = bgmState.filters;
+  const opt = (list, cur, all) => `<option value="">${all}</option>` + list.map(o =>
+    `<option value="${UI.esc(o.value)}"${String(o.value) === String(cur || '') ? ' selected' : ''}>${UI.esc(o.label)}</option>`).join('');
+  const cats = Object.keys(meta.categories).map(k => ({ value: k, label: meta.categories[k] }));
+  host.innerHTML = `
+    <div class="field"><label for="bgmSearch">Search</label>
+      <input class="input" id="bgmSearch" placeholder="Number, bank, beneficiary, contract" value="${UI.esc(f.search || '')}"></div>
+    <div class="field"><label for="bgmCat">Type</label><select class="input" id="bgmCat">${opt(cats, f.category, 'All types')}</select></div>
+    <div class="field"><label for="bgmIssuer">Bank / insurance company</label><select class="input" id="bgmIssuer">
+      ${opt(meta.issuers.map(x => ({ value: x, label: x })), f.issuer, 'All')}</select></div>
+    <div class="field"><label for="bgmBen">Beneficiary</label><select class="input" id="bgmBen">
+      ${opt(meta.beneficiaries.map(x => ({ value: x, label: x })), f.beneficiary, 'All')}</select></div>
+    <div class="field"><label for="bgmProj">Project</label><select class="input" id="bgmProj">
+      ${opt(meta.projects.map(p => ({ value: p.ProjectID, label: p.ProjectName })), f.projectId, 'All')}</select></div>
+    <div class="field"><label for="bgmContract">Contract / work order</label>
+      <input class="input" id="bgmContract" value="${UI.esc(f.contract || '')}"></div>
+    <div class="field"><label for="bgmStatus">Recovery status</label><select class="input" id="bgmStatus">
+      ${opt(meta.statuses.filter(s => s !== 'Void').map(s => ({ value: s, label: s })), f.status, 'All')}</select></div>
+    <div class="field"><label for="bgmIssueFrom">Issued from</label><input class="input" type="date" id="bgmIssueFrom" value="${UI.esc(f.issueFrom || '')}"></div>
+    <div class="field"><label for="bgmIssueTo">Issued to</label><input class="input" type="date" id="bgmIssueTo" value="${UI.esc(f.issueTo || '')}"></div>
+    <div class="field"><label for="bgmExpFrom">Expiring from</label><input class="input" type="date" id="bgmExpFrom" value="${UI.esc(f.expiryFrom || '')}"></div>
+    <div class="field"><label for="bgmExpTo">Expiring to</label><input class="input" type="date" id="bgmExpTo" value="${UI.esc(f.expiryTo || '')}"></div>
+    <div class="field" style="align-self:end"><button class="btn" id="bgmClear">Clear</button></div>`;
+  const read = () => {
+    const v = id => document.getElementById(id).value.trim();
+    bgmState.filters = {
+      search: v('bgmSearch'), category: v('bgmCat'), issuer: v('bgmIssuer'), beneficiary: v('bgmBen'),
+      projectId: v('bgmProj'), contract: v('bgmContract'), status: v('bgmStatus'),
+      issueFrom: v('bgmIssueFrom'), issueTo: v('bgmIssueTo'), expiryFrom: v('bgmExpFrom'), expiryTo: v('bgmExpTo')
+    };
+    onApply();
+  };
+  let t;
+  host.querySelectorAll('input').forEach(i => { i.oninput = () => { clearTimeout(t); t = setTimeout(read, 350); }; });
+  host.querySelectorAll('select').forEach(s => { s.onchange = read; });
+  document.getElementById('bgmClear').onclick = () => { bgmState.filters = {}; bgmFilterBar(host, meta, onApply); onApply(); };
+}
+
+/* ----------------------------------------------------------- DASHBOARD */
+
+async function pageBgmDashboard(root) {
+  root.innerHTML = pageHead('CDR & Guarantees', 'Recovery of CDRs, bank guarantees, performance bonds and insurance guarantees',
+    `<button class="btn btn-primary hidden" id="bgmNew">+ Register instrument</button>`) +
+    `<div class="card"><div class="card-head"><div class="filters" id="bgmFilters"></div></div></div>
+     <div id="bgmDash" class="mt-16">${UI.loadingState()}</div>`;
+  let meta;
+  try { meta = await bgmLoadMeta(true); } catch (e) { document.getElementById('bgmDash').innerHTML = UI.errorState(e.message); return; }
+  const nb = document.getElementById('bgmNew');
+  nb.classList.toggle('hidden', !meta.access.canEdit);
+  nb.onclick = () => bgmInstrumentForm(null, id => navigate('bgm-instrument', id));
+  const load = async () => {
+    const host = document.getElementById('bgmDash');
+    host.innerHTML = UI.loadingState();
+    let d;
+    try { d = (await api('bgmDashboard', bgmState.filters)).data; } catch (e) { host.innerHTML = UI.errorState(e.message); return; }
+    const s = d.byStatus;
+    const cat = k => d.byCategory[k];
+    const totalsRows = [
+      ['Exposure (face value of instruments not yet released)', 'Exposure'],
+      ['Cash margins on open instruments', 'CashMargin'],
+      ['Security deposits on open instruments (CDRs included)', 'SecurityDeposit'],
+      ['Pending recovery: due now and not yet back', 'PendingRecovery'],
+      ['Outstanding recoverable: everything still to come back', 'Outstanding'],
+      ['Recovered to date', 'Recovered'],
+      ['Charges paid (bank, insurance, renewal, other)', 'Charges']
+    ];
+    host.innerHTML = `
+      ${d.over90 ? `<div class="card" style="border-left:4px solid var(--over);padding:12px 16px;margin-bottom:16px">
+         <strong>${d.over90} recover${d.over90 === 1 ? 'y has' : 'ies have'} been outstanding for more than 90 days.</strong>
+         <span class="muted">Listed under Overdue recoveries below, oldest first.</span></div>` : ''}
+      <div class="card"><div class="card-head"><div class="card-title">Instruments</div></div>
+        <div class="stat-grid" style="padding:16px">
+          ${['CDR', 'BG', 'PB', 'IG'].map(k => statTileBgm(cat(k).label + (k === 'CDR' ? 's' : 's'), String(cat(k).total),
+            cat(k).open + ' still open')).join('')}
+        </div></div>
+      <div class="card mt-16"><div class="card-head"><div class="card-title">Recovery position</div></div>
+        <div class="stat-grid" style="padding:16px">
+          ${statTileBgm('Active', String(s['Active']), 'valid, nothing due yet')}
+          ${statTileBgm('Expired – recovery required', String(s['Expired – Recovery Required']), 'no release requested yet')}
+          ${statTileBgm('CDRs not yet returned', String(s['Return Pending']), 'with the beneficiary')}
+          ${statTileBgm('Pending release', String(s['Release Requested']), 'request made, awaiting the original')}
+          ${statTileBgm('Pending cancellation', String(s['Cancellation Pending']), 'original back, awaiting the issuer')}
+          ${statTileBgm('Pending refund', String(s['Refund Pending'] + s['Partially Recovered']),
+            s['Partially Recovered'] + ' partly recovered')}
+          ${statTileBgm('Fully recovered', String(s['Recovered']), 'ready to close')}
+          ${statTileBgm('Closed', String(s['Closed']), 'verified and closed')}
+        </div></div>
+      <div class="card mt-16"><div class="card-head"><div class="card-title">Money</div>
+        <span class="muted" style="font-size:12px">Exposure is what the instruments guarantee. Only margins and deposits are cash to recover.</span></div>
+        <div id="bgmMoney"></div></div>
+      <div class="card mt-16"><div class="card-head"><div class="card-title">Alerts</div>
+        <span class="muted" style="font-size:12px">${d.alerts.length} open</span></div><div id="bgmAlerts"></div></div>
+      <div class="card mt-16"><div class="card-head"><div class="card-title">Overdue recoveries</div>
+        <span class="muted" style="font-size:12px">oldest first</span></div><div id="bgmOverdue"></div></div>`;
+    const currencies = d.totals.map(t => t.Currency);
+    UI.table(document.getElementById('bgmMoney'), {
+      columns: [{ key: 'label', label: '' }].concat(currencies.map((c, i) => ({
+        key: c, label: c, align: 'right', render: r => r.bold ? `<strong>${UI.fmt.money(r.vals[i])}</strong>` : UI.fmt.money(r.vals[i])
+      }))),
+      rows: totalsRows.map(([label, k]) => ({ label, vals: d.totals.map(t => t[k]), bold: k === 'Outstanding' })),
+      empty: UI.emptyState('No instruments', 'Nothing is registered yet, or nothing matches the filters.')
+    });
+    UI.table(document.getElementById('bgmAlerts'), {
+      columns: [
+        { key: 'text', label: 'Alert', render: a => UI.badge(a.text, BGM_ALERT_TONE[a.level]) },
+        { key: 'InstrumentID', label: 'Record', render: a => bgmLink(a.InstrumentID) },
+        { key: 'CategoryName', label: 'Type' },
+        { key: 'ReferenceNo', label: 'Number' },
+        { key: 'Issuer', label: 'Bank / insurer' },
+        { key: 'Beneficiary', label: 'Beneficiary' },
+        { key: 'Outstanding', label: 'Outstanding', align: 'right', render: a => bgmMoney(a.Outstanding, a.Currency) },
+        { key: 'ResponsibleName', label: 'Responsible' }
+      ],
+      rows: d.alerts,
+      empty: UI.emptyState('No alerts', 'Nothing is expiring in the next 60 days and nothing is overdue.')
+    });
+    bgmOverdueTable(document.getElementById('bgmOverdue'), d.overdue);
+    bgmWireLinks(host);
+  };
+  bgmFilterBar(document.getElementById('bgmFilters'), meta, load);
+  await load();
+}
+
+function statTileBgm(label, value, sub) {
+  return `<div class="stat"><div class="stat-label">${UI.esc(label)}</div><div class="stat-value">${value}</div>
+          ${sub ? `<div class="stat-note">${UI.esc(sub)}</div>` : ''}</div>`;
+}
+
+function bgmOverdueTable(host, rows) {
+  UI.table(host, {
+    columns: [
+      { key: 'InstrumentID', label: 'Record', render: r => bgmLink(r.InstrumentID) },
+      { key: 'CategoryName', label: 'Type' },
+      { key: 'ReferenceNo', label: 'Number' },
+      { key: 'Issuer', label: 'Bank / insurer' },
+      { key: 'ExpiryDate', label: 'Expiry', render: r => bgmDate(r.ExpiryDate) },
+      { key: 'DueDate', label: 'Due since', render: r => bgmDate(r.DueDate) },
+      { key: 'DaysOutstanding', label: 'Days', align: 'right',
+        render: r => r.DaysOutstanding > 90 ? `<strong style="color:var(--over)">${r.DaysOutstanding}</strong>` : String(r.DaysOutstanding) },
+      { key: 'Ageing', label: 'Ageing' },
+      { key: 'Outstanding', label: 'Pending', align: 'right', render: r => bgmMoney(r.Outstanding, r.Currency) },
+      { key: 'LastFollowupDate', label: 'Last follow-up', render: r => bgmDate(r.LastFollowupDate) },
+      { key: 'NextFollowupDate', label: 'Next', render: r => bgmDate(r.NextFollowupDate) },
+      { key: 'ResponsibleName', label: 'Responsible' },
+      { key: 'DelayReason', label: 'Reason for delay' },
+      { key: 'RecoveryStatus', label: 'Status', render: r => UI.badge(r.RecoveryStatus, BGM_TONE[r.RecoveryStatus]) }
+    ],
+    rows,
+    empty: UI.emptyState('Nothing overdue', 'Every recovery that has fallen due is complete.')
+  });
+}
+
+/* ------------------------------------------------------------ REGISTER */
+
+async function pageBgmRegister(root) {
+  root.innerHTML = pageHead('Instrument Register', 'Every CDR, bank guarantee, performance bond and insurance guarantee',
+    `<button class="btn" id="bgmCsv">Export to Excel</button> <button class="btn" id="bgmPrint">Print</button>
+     <button class="btn btn-primary hidden" id="bgmNew">+ Register instrument</button>`) +
+    `<div class="card"><div class="card-head"><div class="filters" id="bgmFilters"></div></div>
+       <div id="bgmList">${UI.loadingState()}</div><div id="bgmTotals"></div></div>`;
+  let meta;
+  try { meta = await bgmLoadMeta(true); } catch (e) { document.getElementById('bgmList').innerHTML = UI.errorState(e.message); return; }
+  const nb = document.getElementById('bgmNew');
+  nb.classList.toggle('hidden', !meta.access.canEdit);
+  nb.onclick = () => bgmInstrumentForm(null, id => navigate('bgm-instrument', id));
+  let last = null;
+  const cols = [
+    { key: 'InstrumentID', label: 'Record', render: r => bgmLink(r.InstrumentID) },
+    { key: 'CategoryName', label: 'Type' },
+    { key: 'ReferenceNo', label: 'Number' },
+    { key: 'Issuer', label: 'Bank / insurer' },
+    { key: 'Beneficiary', label: 'Beneficiary' },
+    { key: 'ProjectName', label: 'Project / contract',
+      render: r => UI.esc(r.ProjectName || '') + (r.ContractRef ? `<br><span class="muted" style="font-size:12px">${UI.esc(r.ContractRef)}</span>` : '') },
+    { key: 'IssueDate', label: 'Issued', render: r => bgmDate(r.IssueDate) },
+    { key: 'ExpiryDate', label: 'Expiry', render: r => bgmDate(r.Category === 'CDR' ? r.ExpectedReturnDate : r.ExpiryDate) },
+    { key: 'FaceValue', label: 'Face value', align: 'right', render: r => bgmMoney(r.FaceValue, r.Currency) },
+    { key: 'Refundable', label: 'Refundable', align: 'right', render: r => bgmMoney(r.Refundable, r.Currency) },
+    { key: 'Recovered', label: 'Recovered', align: 'right', render: r => bgmMoney(r.Recovered, r.Currency) },
+    { key: 'Outstanding', label: 'Outstanding', align: 'right', render: r => `<strong>${bgmMoney(r.Outstanding, r.Currency)}</strong>` },
+    { key: 'RecoveryStatus', label: 'Status', render: r => UI.badge(r.RecoveryStatus, BGM_TONE[r.RecoveryStatus]) +
+        (r.DaysOutstanding ? `<br><span class="muted" style="font-size:12px">${r.DaysOutstanding} days overdue</span>` : '') }
+  ];
+  const load = async () => {
+    const host = document.getElementById('bgmList');
+    host.innerHTML = UI.loadingState();
+    try { last = (await api('bgmListInstruments', bgmState.filters)).data; } catch (e) { host.innerHTML = UI.errorState(e.message); return; }
+    UI.table(host, { columns: cols, rows: last.rows,
+      empty: UI.emptyState('No instruments', meta.access.canEdit ? 'Register the first one with "+ Register instrument".' : 'Nothing matches.') });
+    document.getElementById('bgmTotals').innerHTML = last.totals.length ? `<div style="padding:12px 16px" class="muted">` +
+      last.totals.map(t => `<strong>${UI.esc(t.Currency)}</strong>: ${t.Count} instrument${t.Count === 1 ? '' : 's'} · face value ${UI.fmt.money(t.FaceValue)} · ` +
+        `recovered ${UI.fmt.money(t.Recovered)} · <strong>outstanding ${UI.fmt.money(t.Outstanding)}</strong>`).join('<br>') + `</div>` : '';
+    bgmWireLinks(host);
+  };
+  document.getElementById('bgmCsv').onclick = () => last && bgmCsv('Instrument register', last.rows, BGM_EXPORT_COLS);
+  document.getElementById('bgmPrint').onclick = () => last && bgmPrintList('Instrument register', last.rows, last.totals);
+  bgmFilterBar(document.getElementById('bgmFilters'), meta, load);
+  await load();
+}
+
+const BGM_EXPORT_COLS = [
+  ['InstrumentID', 'Record'], ['CategoryName', 'Type'], ['ReferenceNo', 'Number'], ['Issuer', 'Bank / insurance company'],
+  ['Beneficiary', 'Beneficiary'], ['ProjectName', 'Project'], ['ContractRef', 'Contract'], ['WorkOrderNo', 'Work order'],
+  ['Purpose', 'Purpose'], ['Currency', 'Currency'], ['IssueDate', 'Issue / deposit date'], ['ExpiryDate', 'Expiry'],
+  ['ExpectedReturnDate', 'Expected return'], ['ReleaseEligibilityDate', 'Release eligibility'],
+  ['FaceValue', 'Face value'], ['CashMargin', 'Cash margin'], ['MarginPercent', 'Margin %'], ['SecurityDeposit', 'Security deposit'],
+  ['Refundable', 'Refundable'], ['Recovered', 'Recovered'], ['Outstanding', 'Outstanding'], ['TotalCharges', 'Charges'],
+  ['RecoveryStatus', 'Recovery status'], ['ReleaseRequestedOn', 'Release requested'], ['OriginalReturnedOn', 'Original returned'],
+  ['CancellationConfirmedOn', 'Cancellation confirmed'], ['DueDate', 'Recovery due since'], ['DaysOutstanding', 'Days outstanding'],
+  ['Ageing', 'Ageing'], ['LastFollowupDate', 'Last follow-up'], ['NextFollowupDate', 'Next follow-up'],
+  ['ResponsibleName', 'Responsible'], ['DelayReason', 'Reason for delay'], ['DocumentRef', 'Document reference'], ['Remarks', 'Remarks']
+];
+
+/** Written in the browser from what is on screen: nothing extra leaves the server. */
+function bgmCsv(title, rows, cols) {
+  const cell = v => {
+    const s = v === null || v === undefined ? '' : String(v);
+    return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+  };
+  const csv = '﻿' + [cols.map(c => cell(c[1])).join(',')]
+    .concat(rows.map(r => cols.map(c => cell(r[c[0]])).join(','))).join('\r\n');
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }));
+  a.download = title.replace(/[^\w ]+/g, '').replace(/ /g, '_') + '_' + new Date().toISOString().slice(0, 10) + '.csv';
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+
+function bgmPrintList(title, rows, totals) {
+  const f = bgmState.filters;
+  const meta = Object.keys(f).filter(k => f[k]).map(k => k + ': ' + f[k]);
+  const body = `<table><thead><tr><th>Record</th><th>Type</th><th>Number</th><th>Bank / insurer</th><th>Beneficiary</th>
+      <th>Expiry</th><th class="r">Face value</th><th class="r">Refundable</th><th class="r">Recovered</th>
+      <th class="r">Outstanding</th><th>Status</th><th class="r">Days</th></tr></thead><tbody>` +
+    rows.map(r => `<tr><td>${UI.esc(r.InstrumentID)}</td><td>${UI.esc(r.CategoryName)}</td><td>${UI.esc(r.ReferenceNo)}</td>
+      <td>${UI.esc(r.Issuer)}</td><td>${UI.esc(r.Beneficiary)}</td><td>${UI.esc(r.Category === 'CDR' ? r.ExpectedReturnDate : r.ExpiryDate)}</td>
+      <td class="r">${bgmMoney(r.FaceValue, r.Currency)}</td><td class="r">${bgmMoney(r.Refundable, r.Currency)}</td>
+      <td class="r">${bgmMoney(r.Recovered, r.Currency)}</td><td class="r"><strong>${bgmMoney(r.Outstanding, r.Currency)}</strong></td>
+      <td>${UI.esc(r.RecoveryStatus)}</td><td class="r">${r.DaysOutstanding || ''}</td></tr>`).join('') + `</tbody></table>` +
+    (totals || []).map(t => `<p><strong>${UI.esc(t.Currency)}</strong>: ${t.Count} instruments · face value ${UI.fmt.money(t.FaceValue)} ·
+      recovered ${UI.fmt.money(t.Recovered)} · <strong>outstanding ${UI.fmt.money(t.Outstanding)}</strong></p>`).join('');
+  UI.print.send(UI.print.page({ title, meta, body, styles: UI.print.docStyles() + '@page{size:A4 landscape}', signatures: ['Prepared by (HO Accounts)', 'Reviewed by (CFO)'] }));
+}
+
+/* -------------------------------------------------------------- DETAIL */
+
+async function pageBgmInstrument(root, id) {
+  root.innerHTML = pageHead(id || 'Instrument', '') + UI.loadingState();
+  let d;
+  try { await bgmLoadMeta(); d = (await api('bgmGetInstrument', id)).data; }
+  catch (e) { root.innerHTML = pageHead(id || 'Instrument', '') + UI.errorState(e.message); return; }
+  const i = d.instrument, a = d.access, cur = i.Currency;
+  const open = i.RecoveryStatus !== 'Closed' && i.RecoveryStatus !== 'Void';
+  const isCdr = i.Category === 'CDR';
+  const m = v => bgmMoney(v, cur);
+  const recorded = t => d.events.some(e => e.EventType === t && !e.ReversedAt);
+  const freeSteps = d.allowedEvents.filter(e => e.type === 'RENEWED' || !recorded(e.type));
+  const btn = (id2, label, cls = '') => `<button class="btn ${cls}" id="${id2}">${label}</button>`;
+  const actions = [
+    a.canEdit && open ? btn('bgmEdit', 'Edit') : '',
+    a.canEdit && open && freeSteps.length ? btn('bgmStep', 'Record a step') : '',
+    a.canEdit && open && i.Outstanding > 0 ? btn('bgmRefund', 'Record refund', 'btn-primary') : '',
+    a.canEdit && open ? btn('bgmFollow', 'Add follow-up') : '',
+    a.canAdjust && open ? btn('bgmAdjust', 'Adjust refundable') : '',
+    a.canEdit && i.RecoveryStatus === 'Recovered' ? btn('bgmClose', 'Close', 'btn-primary') : '',
+    a.canAdjust && i.RecoveryStatus === 'Closed' ? btn('bgmReopen', 'Reopen') : '',
+    btn('bgmPrintOne', 'Print'),
+    a.canEdit && open && !i.Recovered ? btn('bgmVoid', 'Void', 'btn-ghost') : ''
+  ].filter(Boolean).join(' ');
+  root.innerHTML = pageHead(`${i.InstrumentID} · ${i.CategoryName} ${i.ReferenceNo}`,
+    `${i.Issuer} → ${i.Beneficiary}`, actions) + `
+    <div class="flex gap-8" style="margin:-6px 0 14px;align-items:center;flex-wrap:wrap">
+      ${UI.badge(i.RecoveryStatus, BGM_TONE[i.RecoveryStatus])}
+      ${(i.Alerts || []).map(x => UI.badge(x.text, BGM_ALERT_TONE[x.level])).join(' ')}
+      ${i.RecoveryStatus === 'Void' ? `<span class="muted">Voided: ${UI.esc(i.CancelReason)}</span>` : ''}
+    </div>
+    <div class="grid-2">
+      <div class="card"><div class="card-head"><div class="card-title">Money</div></div><div class="card-body">
+        <dl class="kv">
+          <dt>${isCdr ? 'CDR amount' : 'Exposure (face value)'}</dt><dd>${m(i.FaceValue)}</dd>
+          ${isCdr ? '' : `<dt>Cash margin</dt><dd>${m(i.CashMargin)}${i.MarginPercent !== null ? ` <span class="muted">(${i.MarginPercent}%)</span>` : ''}</dd>
+          <dt>Security deposit</dt><dd>${m(i.SecurityDeposit)}</dd>`}
+          <dt>Refundable</dt><dd>${m(i.Refundable)}${i.Adjustments ? ` <span class="muted">incl. adjustments ${m(i.Adjustments)}</span>` : ''}</dd>
+          <dt>Recovered</dt><dd>${m(i.Recovered)}</dd>
+          <dt>Outstanding</dt><dd><strong style="font-size:15px">${m(i.Outstanding)}</strong></dd>
+          <dt>Charges</dt><dd>${m(i.TotalCharges)} <span class="muted">bank ${UI.fmt.money(i.BankCharges)} · insurance ${UI.fmt.money(i.InsuranceCharges)} ·
+            renewal ${UI.fmt.money(i.RenewalCharges)} · other ${UI.fmt.money(i.OtherExpenses)}</span></dd>
+        </dl></div></div>
+      <div class="card"><div class="card-head"><div class="card-title">Details</div></div><div class="card-body">
+        <dl class="kv">
+          <dt>${isCdr ? 'Deposit date' : 'Issue date'}</dt><dd>${bgmDate(i.IssueDate)}</dd>
+          ${isCdr ? `<dt>Expected return</dt><dd>${bgmDate(i.ExpectedReturnDate)}</dd>` : `<dt>Expiry</dt><dd>${bgmDate(i.ExpiryDate)}${
+            i.DaysToExpiry !== null && i.DaysToExpiry >= 0 ? ` <span class="muted">(${i.DaysToExpiry} days left)</span>` : ''}</dd>`}
+          ${i.ReleaseEligibilityDate ? `<dt>${i.Category === 'IG' ? 'Margin refund eligibility' : 'Release eligibility'}</dt><dd>${bgmDate(i.ReleaseEligibilityDate)}</dd>` : ''}
+          <dt>Recovery due since</dt><dd>${bgmDate(i.DueDate)}${i.DaysOutstanding ? ` <strong>${i.DaysOutstanding} days</strong> · ${UI.esc(i.Ageing)}` : ''}</dd>
+          <dt>Project</dt><dd>${UI.esc(i.ProjectName || '—')}</dd>
+          <dt>Contract / work order</dt><dd>${UI.esc([i.ContractRef, i.WorkOrderNo].filter(Boolean).join(' · ') || '—')}</dd>
+          <dt>Purpose</dt><dd>${UI.esc(i.Purpose || '—')}</dd>
+          <dt>Responsible</dt><dd>${UI.esc(i.ResponsibleName || '—')}</dd>
+          <dt>Document reference</dt><dd>${UI.esc(i.DocumentRef || '—')}</dd>
+          <dt>Reason for delay</dt><dd>${UI.esc(i.DelayReason || '—')}</dd>
+          <dt>Remarks</dt><dd>${UI.esc(i.Remarks || '—')}</dd>
+        </dl></div></div>
+    </div>
+    <div class="card mt-16"><div class="card-head"><div class="card-title">Recovery steps</div>
+      <span class="muted" style="font-size:12px">${isCdr ? 'CDR returned and refund received are separate steps'
+        : 'original returned, cancellation confirmed and margin refunded are separate steps'}</span></div>
+      <div id="bgmSteps"></div></div>
+    <div class="card mt-16"><div class="card-head"><div class="card-title">Money received back and adjustments</div></div><div id="bgmRecs"></div></div>
+    <div class="card mt-16"><div class="card-head"><div class="card-title">Follow-ups</div>
+      <span class="muted" style="font-size:12px">newest first · never overwritten</span></div><div id="bgmFus"></div></div>
+    <div class="card mt-16"><div class="card-head"><div class="card-title">History</div>
+      <span class="muted" style="font-size:12px">created by ${UI.esc(i.CreatedByName)} · last changed by ${UI.esc(i.UpdatedByName)}</span></div>
+      <div id="bgmHist"></div></div>`;
+
+  const reversed = r => r.ReversedAt ? ` <span class="muted">reversed by ${UI.esc(r.ReversedByName)}: ${UI.esc(r.ReversalReason)}</span>` : '';
+  const strike = (r, html) => r.ReversedAt ? `<s class="muted">${html}</s>` : html;
+  UI.table(document.getElementById('bgmSteps'), {
+    columns: [
+      { key: 'EventDate', label: 'Date', render: e => strike(e, bgmDate(e.EventDate)) },
+      { key: 'Label', label: 'Step', render: e => strike(e, UI.esc(e.Label)) + reversed(e) },
+      { key: 'Details', label: 'Details', render: e => UI.esc([e.NewExpiryDate ? `new expiry ${e.NewExpiryDate}` : '',
+          e.Amount ? `charges ${m(e.Amount)}` : '', e.Reference, e.Details].filter(Boolean).join(' · ')) },
+      { key: 'CreatedByName', label: 'Recorded by' },
+      { key: 'x', label: '', render: e => a.canEdit && open && !e.ReversedAt
+          ? `<button class="btn btn-sm btn-ghost" data-rev-ev="${UI.esc(e.EventID)}">Reverse</button>` : '' }
+    ],
+    rows: d.events,
+    empty: UI.emptyState('No steps yet', isCdr ? 'Record when the return is requested and when the CDR comes back.'
+      : 'Record the release request, the original coming back and the cancellation.')
+  });
+  UI.table(document.getElementById('bgmRecs'), {
+    columns: [
+      { key: 'RecoveryDate', label: 'Date', render: r => strike(r, bgmDate(r.RecoveryDate)) },
+      { key: 'Kind', label: 'Entry', render: r => strike(r, r.Kind === 'RECEIPT' ? 'Received' : 'Adjustment (CFO)') + reversed(r) },
+      { key: 'Amount', label: 'Amount', align: 'right', render: r => strike(r, m(r.Amount)) },
+      { key: 'Reference', label: 'Bank advice / reference' },
+      { key: 'Remarks', label: 'Remarks' },
+      { key: 'CreatedByName', label: 'Recorded by' },
+      { key: 'x', label: '', render: r => open && !r.ReversedAt && (r.Kind === 'RECEIPT' ? a.canEdit : a.canAdjust)
+          ? `<button class="btn btn-sm btn-ghost" data-rev-rec="${UI.esc(r.RecoveryID)}">Reverse</button>` : '' }
+    ],
+    rows: d.recoveries,
+    empty: UI.emptyState('Nothing received yet', 'Record each refund as the bank advice arrives; part payments are fine.')
+  });
+  UI.table(document.getElementById('bgmFus'), {
+    columns: [
+      { key: 'FollowupDate', label: 'Date', render: f => bgmDate(f.FollowupDate) },
+      { key: 'Method', label: 'How' },
+      { key: 'PartyContacted', label: 'Contacted', render: f => UI.esc(f.PartyContacted) +
+          (f.PersonContacted ? `<br><span class="muted" style="font-size:12px">${UI.esc(f.PersonContacted)}</span>` : '') },
+      { key: 'Remarks', label: 'What was said' },
+      { key: 'NextFollowupDate', label: 'Next', render: f => bgmDate(f.NextFollowupDate) },
+      { key: 'AssignedName', label: 'Assigned to' },
+      { key: 'CorrespondenceRef', label: 'Correspondence' },
+      { key: 'CreatedByName', label: 'Recorded by' }
+    ],
+    rows: d.followups,
+    empty: UI.emptyState('No follow-ups yet', 'Each call, letter or visit is recorded here and kept.')
+  });
+  UI.table(document.getElementById('bgmHist'), {
+    columns: [
+      { key: 'At', label: 'When', render: h => UI.esc(new Date(h.At).toLocaleString('en-GB')) },
+      { key: 'By', label: 'Who' }, { key: 'Action', label: 'Action' }, { key: 'Remarks', label: 'Note' }
+    ],
+    rows: d.history
+  });
+
+  const reload = () => pageBgmInstrument(root, id);
+  const on = (bid, fn) => { const b = document.getElementById(bid); if (b) b.onclick = fn; };
+  on('bgmEdit', () => bgmInstrumentForm(i, reload));
+  on('bgmStep', () => bgmStepDialog(i, freeSteps, reload));
+  on('bgmRefund', () => bgmRecoveryDialog(i, 'RECEIPT', reload));
+  on('bgmAdjust', () => bgmRecoveryDialog(i, 'ADJUSTMENT', reload));
+  on('bgmFollow', () => bgmFollowupDialog(i, reload));
+  on('bgmClose', () => bgmReasonDialog('Close ' + i.InstrumentID, 'Verification note (for example: refund agreed to bank statement)',
+    'Close', false, r => api('bgmCloseInstrument', i.InstrumentID, r), reload));
+  on('bgmReopen', () => bgmReasonDialog('Reopen ' + i.InstrumentID, 'Why it is being reopened', 'Reopen', true,
+    r => api('bgmReopenInstrument', i.InstrumentID, r), reload));
+  on('bgmVoid', () => bgmReasonDialog('Void ' + i.InstrumentID, 'Why this record is void (kept, but out of every total)', 'Void', true,
+    r => api('bgmVoidInstrument', i.InstrumentID, r), reload, true));
+  on('bgmPrintOne', () => bgmPrintInstrument(d));
+  root.querySelectorAll('[data-rev-ev]').forEach(b => { b.onclick = () => bgmReasonDialog('Reverse this step', 'Why it is being reversed',
+    'Reverse', true, r => api('bgmReverseEvent', b.dataset.revEv, r), reload, true); });
+  root.querySelectorAll('[data-rev-rec]').forEach(b => { b.onclick = () => bgmReasonDialog('Reverse this entry', 'Why it is being reversed',
+    'Reverse', true, r => api('bgmReverseRecovery', b.dataset.revRec, r), reload, true); });
+}
+
+function bgmPrintInstrument(d) {
+  const i = d.instrument, m = v => bgmMoney(v, i.Currency);
+  const body = `<dl class="kv">
+      <dt>Type</dt><dd>${UI.esc(i.CategoryName)}</dd><dt>Number</dt><dd>${UI.esc(i.ReferenceNo)}</dd>
+      <dt>Bank / insurer</dt><dd>${UI.esc(i.Issuer)}</dd><dt>Beneficiary</dt><dd>${UI.esc(i.Beneficiary)}</dd>
+      <dt>Project / contract</dt><dd>${UI.esc([i.ProjectName, i.ContractRef, i.WorkOrderNo].filter(Boolean).join(' · ') || '—')}</dd>
+      <dt>Issued</dt><dd>${UI.esc(i.IssueDate)}</dd><dt>${i.Category === 'CDR' ? 'Expected return' : 'Expiry'}</dt>
+      <dd>${UI.esc(i.Category === 'CDR' ? i.ExpectedReturnDate : i.ExpiryDate)}</dd>
+      <dt>Face value</dt><dd>${m(i.FaceValue)}</dd><dt>Refundable</dt><dd>${m(i.Refundable)}</dd>
+      <dt>Recovered</dt><dd>${m(i.Recovered)}</dd><dt>Outstanding</dt><dd>${m(i.Outstanding)}</dd>
+      <dt>Status</dt><dd>${UI.esc(i.RecoveryStatus)}</dd></dl>
+    <h3>Steps</h3><table><tr><th>Date</th><th>Step</th><th>Details</th></tr>${d.events.filter(e => !e.ReversedAt).map(e =>
+      `<tr><td>${UI.esc(e.EventDate)}</td><td>${UI.esc(e.Label)}</td><td>${UI.esc([e.NewExpiryDate, e.Reference, e.Details].filter(Boolean).join(' · '))}</td></tr>`).join('')}</table>
+    <h3>Received back</h3><table><tr><th>Date</th><th>Entry</th><th class="r">Amount</th><th>Reference</th></tr>${d.recoveries.filter(r => !r.ReversedAt).map(r =>
+      `<tr><td>${UI.esc(r.RecoveryDate)}</td><td>${r.Kind === 'RECEIPT' ? 'Received' : 'Adjustment'}</td><td class="r">${m(r.Amount)}</td><td>${UI.esc(r.Reference)}</td></tr>`).join('')}</table>
+    <h3>Follow-ups</h3><table><tr><th>Date</th><th>How</th><th>Contacted</th><th>What was said</th><th>Next</th></tr>${d.followups.map(f =>
+      `<tr><td>${UI.esc(f.FollowupDate)}</td><td>${UI.esc(f.Method)}</td><td>${UI.esc(f.PartyContacted)}</td><td>${UI.esc(f.Remarks)}</td><td>${UI.esc(f.NextFollowupDate)}</td></tr>`).join('')}</table>`;
+  UI.print.send(UI.print.page({ title: i.CategoryName, ref: i.ReferenceNo, meta: [i.InstrumentID], body,
+    styles: UI.print.docStyles() + 'h3{font-size:12px;margin:16px 0 0}', signatures: ['Prepared by (HO Accounts)', 'Reviewed by (CFO)'] }));
+}
+
+/* ---------------------------------------------------------- DIALOGS */
+
+function bgmInstrumentForm(existing, onSaved) {
+  const meta = bgmState.meta;
+  const v = Object.assign({ Currency: 'PKR', Category: 'BG' }, existing || {});
+  if (existing && existing.ExpectedRefundable !== undefined) v.ExpectedRefundable = existing.ExpectedRefundable;
+  const users = meta.users.filter(u => u.Level === 'HO_ACCOUNTS' || u.UserID === App.user.UserID || u.UserID === v.ResponsibleUserID);
+  const body = UI.el('div');
+  let form, fields;
+  const build = cat => {
+    const isCdr = cat === 'CDR', ig = cat === 'IG';
+    const amountLabel = { CDR: 'CDR amount', BG: 'Guarantee amount', PB: 'Bond amount', IG: 'Guarantee amount' }[cat];
+    const numberLabel = { CDR: 'CDR number', BG: 'BG number', PB: 'Bond number', IG: 'Guarantee reference number' }[cat];
+    fields = [
+      { name: 'Category', label: 'Type', type: 'select', required: true, readonly: !!existing,
+        options: Object.keys(meta.categories).map(k => ({ value: k, label: meta.categories[k] })) },
+      { name: 'ReferenceNo', label: numberLabel, required: true },
+      { name: 'Issuer', label: ig ? 'Insurance company' : 'Issuing bank', required: true },
+      { name: 'Beneficiary', label: 'Beneficiary', required: true },
+      { name: 'IssueDate', label: isCdr ? 'Deposit date' : 'Issue date', type: 'date', required: true },
+      isCdr ? { name: 'ExpectedReturnDate', label: 'Expected return date', type: 'date', hint: 'Recovery falls due on this date.' }
+        : { name: 'ExpiryDate', label: 'Expiry date', type: 'date', required: true,
+            hint: existing ? 'After a renewal, the expiry changes with "Record a step → Renewed".' : '' },
+      cat === 'PB' || ig ? { name: 'ReleaseEligibilityDate', label: ig ? 'Margin refund eligibility date' : 'Release eligibility date', type: 'date',
+        hint: cat === 'PB' ? 'If the bond can be released before expiry, recovery falls due from this date.' : '' } : null,
+      { name: 'Currency', label: 'Currency', required: true, hint: 'PKR, USD…' },
+      { name: 'FaceValue', label: amountLabel, type: 'number', required: true },
+      isCdr ? null : { name: 'CashMargin', label: ig ? 'Insurance margin deposited' : 'Cash margin', type: 'number' },
+      isCdr ? null : { name: 'SecurityDeposit', label: 'Security deposit', type: 'number' },
+      { name: 'ExpectedRefundable', label: 'Expected refundable amount', type: 'number',
+        hint: isCdr ? 'Blank = the CDR amount.' : 'Blank = cash margin + security deposit. The face value is not cash.' },
+      isCdr || ig ? null : { name: 'BankCharges', label: 'Bank charges', type: 'number' },
+      ig ? { name: 'InsuranceCharges', label: 'Premium / insurance charges', type: 'number' } : null,
+      { name: 'OtherExpenses', label: 'Other expenses', type: 'number' },
+      { name: 'ProjectID', label: 'Project (optional)', type: 'select',
+        options: [{ value: '', label: '— none —' }].concat(meta.projects.map(p => ({ value: p.ProjectID, label: p.ProjectName }))) },
+      { name: 'ContractRef', label: 'Contract reference' },
+      { name: 'WorkOrderNo', label: 'Work order / contract number' },
+      { name: 'ResponsibleUserID', label: 'Responsible (HO Accounts)', type: 'select',
+        options: users.map(u => ({ value: u.UserID, label: u.Name })), value: App.user.UserID },
+      { name: 'DocumentRef', label: 'Document reference', hint: 'File number, or where the original and its scan are kept.' },
+      { name: 'Purpose', label: 'Purpose of the instrument', type: 'textarea', span: 2 },
+      { name: 'Remarks', label: 'Remarks', type: 'textarea', span: 2 }
+    ].filter(Boolean);
+    const cur = form ? UI.readForm(form) : v;
+    cur.Category = cat;
+    const nf = UI.form(fields, cur);
+    body.innerHTML = '';
+    body.appendChild(nf);
+    form = nf;
+    const lists = { Issuer: meta.issuers, Beneficiary: meta.beneficiaries };
+    Object.keys(lists).forEach(k => {
+      const input = form.querySelector(`[name="${k}"]`);
+      const dl = UI.el('datalist', { id: 'bgmDl' + k });
+      dl.innerHTML = lists[k].map(x => `<option value="${UI.esc(x)}">`).join('');
+      input.setAttribute('list', dl.id);
+      form.appendChild(dl);
+    });
+    form.querySelectorAll('input[type="number"]').forEach(n => { n.step = 'any'; n.min = '0'; });
+    const sel = form.querySelector('[name="Category"]');
+    if (!existing) sel.onchange = () => build(sel.value);
+  };
+  build(v.Category);
+  UI.modal({
+    title: existing ? 'Edit ' + existing.InstrumentID : 'Register instrument', body, size: 'wide',
+    footer: [
+      { label: 'Cancel', onClick: mm => mm.close() },
+      { label: existing ? 'Save' : 'Register', class: 'btn-primary', onClick: async mm => {
+          const data = UI.validate(form, fields);
+          if (!data) return;
+          if (existing) { data.InstrumentID = existing.InstrumentID; data.Category = existing.Category; }
+          mm.busy(true);
+          try {
+            const r = await api('bgmSaveInstrument', data);
+            UI.success(r.message);
+            mm.close();
+            onSaved(r.data.InstrumentID || (existing && existing.InstrumentID));
+          } catch (e) { mm.busy(false); UI.error('Not saved', e.message); }
+        } }
+    ]
+  });
+}
+
+function bgmStepDialog(i, steps, onDone) {
+  const meta = bgmState.meta;
+  const fields = () => {
+    const type = form ? form.querySelector('[name="EventType"]').value : steps[0].type;
+    return [
+      { name: 'EventType', label: 'Step', type: 'select', required: true, options: steps.map(s => ({ value: s.type, label: s.label })) },
+      { name: 'EventDate', label: 'Date', type: 'date', required: true, value: meta.today },
+      type === 'RENEWED' ? { name: 'NewExpiryDate', label: 'New expiry date', type: 'date', required: true } : null,
+      type === 'RENEWED' ? { name: 'Amount', label: 'Renewal charges', type: 'number' } : null,
+      { name: 'Reference', label: 'Letter / reference number' },
+      { name: 'Details', label: 'Details', type: 'textarea', span: 2 }
+    ].filter(Boolean);
+  };
+  const body = UI.el('div');
+  let form = null, fl;
+  const build = () => {
+    const keep = form ? UI.readForm(form) : {};
+    fl = fields();
+    const nf = UI.form(fl, keep);
+    body.innerHTML = '';
+    body.appendChild(nf);
+    form = nf;
+    form.querySelector('[name="EventType"]').onchange = build;
+  };
+  build();
+  UI.modal({
+    title: 'Record a step · ' + i.InstrumentID, body,
+    footer: [
+      { label: 'Cancel', onClick: mm => mm.close() },
+      { label: 'Record', class: 'btn-primary', onClick: async mm => {
+          const data = UI.validate(form, fl);
+          if (!data) return;
+          mm.busy(true);
+          try { const r = await api('bgmRecordEvent', i.InstrumentID, data); UI.success(r.message); mm.close(); onDone(); }
+          catch (e) { mm.busy(false); UI.error('Not recorded', e.message); }
+        } }
+    ]
+  });
+}
+
+function bgmRecoveryDialog(i, kind, onDone) {
+  const meta = bgmState.meta;
+  const receipt = kind === 'RECEIPT';
+  const fields = receipt ? [
+    { name: 'RecoveryDate', label: 'Date received', type: 'date', required: true, value: meta.today },
+    { name: 'Amount', label: 'Amount received (' + i.Currency + ')', type: 'number', required: true, value: i.Outstanding,
+      hint: 'Outstanding: ' + UI.fmt.money(i.Outstanding) + '. A part payment is fine.' },
+    { name: 'Reference', label: 'Bank advice / reference' },
+    { name: 'Remarks', label: 'Remarks', type: 'textarea', span: 2 }
+  ] : [
+    { name: 'RecoveryDate', label: 'Date', type: 'date', required: true, value: meta.today },
+    { name: 'Amount', label: 'Change to the refundable amount (' + i.Currency + ')', type: 'number', required: true,
+      hint: 'Positive adds (profit on a CDR, say); negative reduces (a bank deduction written off). Refundable now ' + UI.fmt.money(i.Refundable) + '.' },
+    { name: 'Reference', label: 'Reference' },
+    { name: 'Remarks', label: 'Reason', type: 'textarea', span: 2, required: true }
+  ];
+  const form = UI.form(fields);
+  form.querySelectorAll('input[type="number"]').forEach(n => { n.step = 'any'; });
+  UI.modal({
+    title: (receipt ? 'Record refund · ' : 'Adjust refundable · ') + i.InstrumentID, body: form,
+    footer: [
+      { label: 'Cancel', onClick: mm => mm.close() },
+      { label: 'Record', class: 'btn-primary', onClick: async mm => {
+          const data = UI.validate(form, fields);
+          if (!data) return;
+          data.Kind = kind;
+          mm.busy(true);
+          try { const r = await api('bgmRecordRecovery', i.InstrumentID, data); UI.success(r.message); mm.close(); onDone(); }
+          catch (e) { mm.busy(false); UI.error('Not recorded', e.message); }
+        } }
+    ]
+  });
+}
+
+function bgmFollowupDialog(i, onDone) {
+  const meta = bgmState.meta;
+  const users = meta.users.filter(u => u.Level === 'HO_ACCOUNTS' || u.UserID === App.user.UserID || u.UserID === i.ResponsibleUserID);
+  const fields = [
+    { name: 'FollowupDate', label: 'Date', type: 'date', required: true, value: meta.today },
+    { name: 'Method', label: 'How', type: 'select', required: true, options: meta.followupMethods },
+    { name: 'PartyContacted', label: 'Bank / insurance company / beneficiary contacted', required: true, value: i.Issuer },
+    { name: 'PersonContacted', label: 'Person contacted' },
+    { name: 'Remarks', label: 'What was said', type: 'textarea', span: 2, required: true },
+    { name: 'NextFollowupDate', label: 'Next follow-up', type: 'date' },
+    { name: 'AssignedUserID', label: 'Assigned to', type: 'select', value: i.ResponsibleUserID,
+      options: users.map(u => ({ value: u.UserID, label: u.Name })) },
+    { name: 'CorrespondenceRef', label: 'Letter / email reference' },
+    { name: 'DelayReason', label: 'Reason for delay', value: i.DelayReason, hint: 'Shown on the overdue list.' }
+  ];
+  const form = UI.form(fields);
+  UI.modal({
+    title: 'Add follow-up · ' + i.InstrumentID, body: form,
+    footer: [
+      { label: 'Cancel', onClick: mm => mm.close() },
+      { label: 'Record', class: 'btn-primary', onClick: async mm => {
+          const data = UI.validate(form, fields);
+          if (!data) return;
+          mm.busy(true);
+          try { const r = await api('bgmAddFollowup', i.InstrumentID, data); UI.success(r.message); mm.close(); onDone(); }
+          catch (e) { mm.busy(false); UI.error('Not recorded', e.message); }
+        } }
+    ]
+  });
+}
+
+function bgmReasonDialog(title, label, action, required, fn, onDone, danger) {
+  const fields = [{ name: 'reason', label, type: 'textarea', required, span: 2 }];
+  const form = UI.form(fields);
+  UI.modal({
+    title, body: form, size: 'narrow',
+    footer: [
+      { label: 'Cancel', onClick: mm => mm.close() },
+      { label: action, class: danger ? 'btn-danger' : 'btn-primary', onClick: async mm => {
+          const data = UI.validate(form, fields);
+          if (!data) return;
+          mm.busy(true);
+          try { const r = await fn(data.reason); UI.success(r.message); mm.close(); onDone(); }
+          catch (e) { mm.busy(false); UI.error('Not done', e.message); }
+        } }
+    ]
+  });
+}
+
+/* -------------------------------------------------------------- ACCESS */
+
+async function pageBgmAccess(root) {
+  root.innerHTML = pageHead('Module Access', 'Who may use CDR & Guarantees, and at what level. No role or permission changes.') +
+    `<div class="card"><div class="card-body muted" style="font-size:13px">
+       <strong>HO Accounts</strong>: registers instruments, records steps, refunds and follow-ups, closes.
+       <strong>CFO</strong>: sees everything; authorises adjustments to the refundable amount; reopens a closed record.
+       <strong>Management</strong> and <strong>Internal Audit</strong>: see everything, change nothing.
+       Administrators always have full access.</div><div id="bgmAcc">${UI.loadingState()}</div></div>`;
+  let d;
+  try { d = (await api('bgmListAccess')).data; } catch (e) { document.getElementById('bgmAcc').innerHTML = UI.errorState(e.message); return; }
+  const opts = cur => `<option value="">No access</option>` + Object.keys(d.levels).map(k =>
+    `<option value="${k}"${k === cur ? ' selected' : ''}>${UI.esc(d.levels[k])}</option>`).join('');
+  UI.table(document.getElementById('bgmAcc'), {
+    columns: [
+      { key: 'Name', label: 'User', render: u => `<strong>${UI.esc(u.Name)}</strong><br><span class="muted" style="font-size:12px">${UI.esc(u.Email)}</span>` },
+      { key: 'Role', label: 'PMS role (unchanged)' },
+      { key: 'UserStatus', label: 'Account' },
+      { key: 'Level', label: 'CDR & Guarantees access', render: u => u.Role === 'ADMIN' ? '<span class="muted">Full (administrator)</span>'
+          : `<select class="input" data-acc="${UI.esc(u.UserID)}" style="max-width:200px">${opts(u.Level)}</select>` }
+    ],
+    rows: d.users
+  });
+  document.querySelectorAll('[data-acc]').forEach(s => {
+    s.onchange = async () => {
+      s.disabled = true;
+      try { UI.success((await api('bgmSetAccess', s.dataset.acc, s.value)).message); }
+      catch (e) { UI.error('Not changed', e.message); }
+      s.disabled = false;
+    };
+  });
+}
+
+PAGES['bgm-dashboard'] = pageBgmDashboard;
+PAGES['bgm-register'] = pageBgmRegister;
+PAGES['bgm-instrument'] = pageBgmInstrument;
+PAGES['bgm-access'] = pageBgmAccess;
+</script>
+
+  <script>
 /* =============================================================
    Reports.html — Phase 10. The report browser, the management
    dashboard and the global search box in the header.
@@ -16596,7 +17315,8 @@ PAGES['notifications'] = pageNotifications;
     11: { name: 'Bulk Import / Export, Templates and Documents', done: true },
     12: { name: 'Audit, Notifications, Security, Performance hardening', done: true },
     13: { name: 'Working cash advances and site imprest', done: true },
-    14: { name: 'Labour and salaries', done: true }
+    14: { name: 'Labour and salaries', done: true },
+    15: { name: 'CDR & Guarantees Recovery', done: true }
   };
 
   /**
@@ -16636,6 +17356,8 @@ PAGES['notifications'] = pageNotifications;
     'cash-report': 'cash',
     'labour-sheet': 'labour',
     'salary-sheet': 'salaries',
+    // CDR & Guarantees (11 Nov 2026): its menu group appears only for people with access.
+    'bgm-instrument': 'bgm-register',
     report: 'reports',
     profile: null
   };
