@@ -13906,6 +13906,11 @@ async function pageCashReport(root, reportId) {
          <div id="crCategories"></div>
        </div>
      </div>
+     ${(d.byProject || []).length > 1 ? `<div class="card" style="margin-top:16px">
+       <div class="card-head"><h3>Spend by project</h3>
+         <span class="muted" style="font-size:12.5px">expenses are booked to each project when the report is approved</span></div>
+       <div id="crProjects"></div>
+     </div>` : ''}
      <div class="card" style="margin-top:16px">
        <div class="card-head"><h3>Every entry in this period</h3></div>
        <div id="crRows"></div>
@@ -13923,6 +13928,23 @@ async function pageCashReport(root, reportId) {
     rows: d.byCategory,
     empty: UI.emptyState('No expenses', 'This period holds no site expenses.')
   });
+
+  // A float that paid for several projects (owner's request, 11 Nov 2026).
+  const projHost = document.getElementById('crProjects');
+  if (projHost) {
+    const tot = k => d.byProject.reduce((s, x) => s + Number(x[k] || 0), 0);
+    UI.table(projHost, {
+      columns: [
+        { key: 'project', label: 'Project', render: x => UI.esc(x.project) +
+            (String(x.projectId) === String(d.account.ProjectID) ? ' <span class="muted">· this float\'s</span>' : '') },
+        { key: 'expenses', label: 'Site expenses', align: 'right', render: x => cash(x.expenses) },
+        { key: 'payments', label: 'Payments and advances', align: 'right', render: x => cash(x.payments) },
+        { key: 'total', label: 'Total', align: 'right', render: x => `<strong>${cash(x.total)}</strong>` }
+      ],
+      rows: d.byProject.concat([{ project: 'Total', projectId: '', expenses: tot('expenses'),
+        payments: tot('payments'), total: tot('total') }])
+    });
+  }
 
   UI.table(document.getElementById('crRows'), {
     columns: [
@@ -16085,13 +16107,23 @@ const PRINT_BODIES = {
         <table><thead><tr><th>Category</th><th class="r">Amount</th></tr></thead>
         <tbody>${d.byCategory.map(x => `<tr><td>${UI.esc(x.category)}</td>
           <td class="r">${n(x.amount)}</td></tr>`).join('')}</tbody></table>` : ''}
+      ${(d.byProject || []).length > 1 ? `<h3 style="font-size:12px;margin:18px 0 0">Spend by project</h3>
+        <table><thead><tr><th>Project</th><th class="r">Site expenses</th><th class="r">Payments and advances</th>
+          <th class="r">Total</th></tr></thead>
+        <tbody>${d.byProject.map(x => `<tr><td>${UI.esc(x.project)}</td><td class="r">${n(x.expenses)}</td>
+          <td class="r">${n(x.payments)}</td><td class="r">${n(x.total)}</td></tr>`).join('')}</tbody>
+        <tfoot><tr class="total"><td>Total</td>
+          <td class="r">${n(d.byProject.reduce((s, x) => s + Number(x.expenses || 0), 0))}</td>
+          <td class="r">${n(d.byProject.reduce((s, x) => s + Number(x.payments || 0), 0))}</td>
+          <td class="r">${n(d.byProject.reduce((s, x) => s + Number(x.total || 0), 0))}</td></tr></tfoot></table>` : ''}
       ${(d.rows || []).length ? `<h3 style="font-size:12px;margin:18px 0 0">Entries</h3>
         <table><thead><tr><th>Date</th><th>Type</th><th>Detail</th>
           <th class="r">In</th><th class="r">Out</th></tr></thead>
         <tbody>${d.rows.map(t => `<tr>
           <td>${UI.esc(t.TxnDate || '')}</td>
           <td>${UI.esc(String(t.Type || '').replace(/_/g, ' ').toLowerCase())}</td>
-          <td>${UI.esc(t.Description || t.Category || '')}</td>
+          <td>${UI.esc(t.Description || t.Category || '')}${t.ProjectName && String(t.ProjectID) !== String(a.ProjectID)
+            ? '<br><small>' + UI.esc(t.ProjectName) + '</small>' : ''}</td>
           <td class="r">${t.Signed > 0 ? n(t.Amount) : ''}</td>
           <td class="r">${t.Signed < 0 ? n(t.Amount) : ''}</td></tr>`).join('')}</tbody></table>` : ''}`;
   }
