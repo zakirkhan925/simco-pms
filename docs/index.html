@@ -15661,7 +15661,9 @@ const PRINT_BODIES = {
           <th class="r" style="width:100px">Value</th></tr></thead>
         <tbody>${lines.map(l => `<tr>
           <td>${UI.esc(l.GRNID)}</td><td>${UI.esc(UI.fmt.date(l.ReceiptDate))}</td>
-          <td>${UI.esc(l.ItemCode)}${l.ItemName ? ' — ' + UI.esc(l.ItemName) : ''}</td>
+          <td>${l.Description ? UI.esc(l.Description) + (l.ItemCode ? ' <small>(' + UI.esc(l.ItemCode) + ')</small>' : '')
+            + (l.Specification ? '<br><small>' + UI.esc(l.Specification) + '</small>' : '')
+            : UI.esc(l.ItemCode) + (l.ItemName ? ' — ' + UI.esc(l.ItemName) : '')}</td>
           <td class="r">${n(l.Quantity)} ${UI.esc(l.Unit || '')}</td>
           <td class="r">${n(l.Rate)}</td><td class="r">${n(l.Value)}</td></tr>`).join('')}
         </tbody>
