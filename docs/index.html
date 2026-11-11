@@ -3,8 +3,15 @@
 <head>
   <base target="_top">
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="robots" content="noindex,nofollow">
+  <link rel="manifest" href="manifest.webmanifest">
+  <meta name="theme-color" content="#15325C">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="apple-mobile-web-app-title" content="SIMCO PMS">
+  <link rel="apple-touch-icon" href="apple-touch-icon.png">
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%2315325C'/%3E%3Ctext x='16' y='21' font-family='system-ui,sans-serif' font-size='13' font-weight='700' fill='%23fff' text-anchor='middle'%3ESC%3C/text%3E%3C/svg%3E">
   <title>SIMCO Construction PMS</title>
   <style>
@@ -778,6 +785,89 @@ table.data.ledger tfoot td,table.data.ledger tfoot th{border-top:3px double var(
 .deploy-warn .linklike{color:var(--over);font-size:13.5px}
 @media (max-width:1000px){ .deploy-warn{padding:12px 16px} }
 </style>
+<style>
+/* ----------------------------------------------------------- PHONE */
+/* On a phone the app reads like an app (owner's request, 11 Nov 2026): one
+   compact bar that stays put, the module's screens as a strip that slides,
+   the module list as a sheet from the bottom, forms as sheets, and nothing
+   wider than the screen. A laptop is untouched. */
+.search-toggle{display:none}
+/* The report screen's grid let a wide table push the page sideways. */
+@media (max-width:1000px){ .report-layout{grid-template-columns:minmax(0,1fr)} }
+@media (max-width:720px){
+  :root{--header-h:56px; --strip-h:42px}
+  html,body{overflow-x:hidden;-webkit-tap-highlight-color:transparent}
+  body{background:var(--bg)}
+  .topbar{padding-top:env(safe-area-inset-top)}
+  .topbar-inner{flex-wrap:nowrap;gap:8px;padding:8px 12px;min-height:var(--header-h);position:relative}
+  .brand{order:-1;flex:none}
+  .brand-logo{height:28px;max-width:74px}
+  .brand-name,.brand-ver,.header-title{display:none}
+  #modBar{min-width:0;flex:0 1 auto}
+  .mod-switch{min-height:40px;padding:6px 10px;gap:6px;max-width:100%}
+  .mod-switch-name{font-size:14px;overflow:hidden;text-overflow:ellipsis;max-width:38vw}
+  .header-spacer{flex:1}
+  .icon-btn{min-width:40px;min-height:40px}
+  .search-toggle{display:grid}
+  .user-chip{padding:3px;min-height:40px}
+  .user-chip .user-meta{display:none}
+  /* Search drops in under the bar when the magnifier is tapped. */
+  .global-search{display:none;order:0}
+  .topbar.search-open .global-search{display:block;position:absolute;left:0;right:0;top:100%;width:auto;
+    max-width:none;padding:8px 12px;background:var(--surface);border-bottom:1px solid var(--rule);z-index:31}
+  .topbar.search-open .global-search::before{left:22px}
+  .global-search input{font-size:16px}
+  .search-results{left:12px !important;right:12px !important;width:auto !important}
+  .dropdown{right:8px;top:calc(var(--header-h) + env(safe-area-inset-top))}
+  /* The screens of the module: a strip that slides under the bar. */
+  .navstrip-wrap{position:sticky;top:calc(var(--header-h) + env(safe-area-inset-top));z-index:29}
+  .nav.navstrip{padding:0 12px;gap:20px;scrollbar-width:none;-webkit-overflow-scrolling:touch}
+  .nav.navstrip::-webkit-scrollbar{display:none}
+  .nav-group{gap:20px}
+  .nav-item{font-size:14px}
+  /* The module list: a sheet from the bottom, the page dimmed behind it. */
+  .mod-menu{left:0 !important;right:0;top:auto !important;bottom:0;width:auto !important;max-height:82vh;
+    overflow-y:auto;border:0;border-radius:16px 16px 0 0;padding-bottom:env(safe-area-inset-bottom);
+    box-shadow:0 0 0 100vmax rgba(10,18,32,.5)}
+  .mod-menu-head{position:sticky;top:0;background:var(--surface);text-align:center;font-weight:600;
+    color:var(--text);font-size:13px;padding:14px 16px 12px}
+  .mod-menu-head::before{content:"";display:block;width:36px;height:4px;border-radius:2px;
+    background:var(--rule-2);margin:-4px auto 10px}
+  .mod-menu-item{min-height:56px}
+  /* The page itself. */
+  .content{padding:14px 12px calc(36px + env(safe-area-inset-bottom))}
+  .crumbs{margin:-4px 0 8px}
+  .page-head{gap:10px;margin-bottom:14px;padding-bottom:10px;align-items:stretch}
+  .page-head > div:first-child{min-width:0}
+  .page-title{font-size:20px}
+  .page-sub{font-size:12.5px}
+  /* A screen's buttons: one row that slides, never off the page. */
+  .page-head > .flex{width:100%;flex-wrap:nowrap;overflow-x:auto;scrollbar-width:none;padding-bottom:2px}
+  .page-head > .flex::-webkit-scrollbar{display:none}
+  .page-head > .flex > *{flex:none}
+  .stat-grid,.kpi-grid{grid-template-columns:1fr 1fr;gap:8px}
+  .stat{padding:11px 12px}
+  .stat-value{font-size:18px;margin-top:4px;overflow-wrap:anywhere}
+  .stat-note{font-size:11px}
+  .card-head{padding:11px 12px}
+  .card-body{padding:12px}
+  .tabs{scrollbar-width:none}
+  .tabs::-webkit-scrollbar{display:none}
+  table{font-size:12.5px}
+  .filters{gap:8px}
+  .filters > *{flex:1 1 100%;min-width:0}
+  .filters input:not([type=checkbox]):not([type=radio]),.filters select{width:100%}
+  .filters > :has(> input[type=checkbox]),.filters > button,.filters > label.check{flex:0 1 auto}
+  /* Forms open as sheets from the bottom; typing does not zoom the page. */
+  .modal-backdrop{padding:0;place-items:end center}
+  .modal,.modal.modal-wide,.modal.modal-narrow{max-width:none;max-height:92vh;border-radius:16px 16px 0 0}
+  .modal-head{padding:14px 16px}
+  .modal-body{padding:16px}
+  .modal-foot{padding:12px 16px calc(12px + env(safe-area-inset-bottom));flex-wrap:wrap}
+  input,select,textarea{font-size:16px !important}
+  #toastHost{left:12px;right:12px;bottom:calc(12px + env(safe-area-inset-bottom));max-width:none}
+}
+</style>
 
 </head>
 <body>
@@ -810,6 +900,12 @@ table.data.ledger tfoot td,table.data.ledger tfoot th{border-top:3px double var(
                  autocomplete="off" aria-label="Global search">
           <div id="globalSearchResults" class="search-results hidden"></div>
         </div>
+        <button class="icon-btn search-toggle" id="searchToggle" aria-label="Search">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+               stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <circle cx="11" cy="11" r="7"></circle><path d="M20 20l-3.5-3.5"></path>
+          </svg>
+        </button>
         <button class="icon-btn" id="notifBtn" aria-label="Notifications">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
                stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -1783,6 +1879,13 @@ function renderShell() {
      <span class="user-meta"><span class="user-name">${UI.esc(App.user.Name)}</span><br>
      <span class="user-role">${UI.esc(App.user.Role.replace(/_/g, ' '))}</span></span>`;
   chip.onclick = toggleUserMenu;
+  // On a phone the search box hides behind a magnifier (11 Nov 2026).
+  const st = document.getElementById('searchToggle');
+  if (st) st.onclick = () => {
+    const bar = document.querySelector('.topbar');
+    const open = bar.classList.toggle('search-open');
+    if (open) document.getElementById('globalSearch').focus();
+  };
   if (typeof initGlobalSearch === 'function') initGlobalSearch();
   if (typeof initNotifications === 'function') initNotifications();
   renderNav();
@@ -1891,6 +1994,15 @@ function renderNav() {
     list.appendChild(b);
   });
   nav.appendChild(list);
+  // On a narrow screen the strip slides: bring the screen you are on into view,
+  // and fold the phone's search box away once you have gone somewhere.
+  const on = list.querySelector('.nav-item.active');
+  if (on && nav.scrollWidth > nav.clientWidth) {
+    nav.scrollLeft += on.getBoundingClientRect().left - nav.getBoundingClientRect().left
+      - (nav.clientWidth - on.offsetWidth) / 2;
+  }
+  const topbarEl = document.querySelector('.topbar');
+  if (topbarEl) topbarEl.classList.remove('search-open');
 }
 
 /** Listeners that belong to an open menu, so closing takes them with it. */
@@ -16536,6 +16648,12 @@ PAGES['notifications'] = pageNotifications;
     return bar;
   };
 })();
+</script>
+<script>
+/* The service worker (site/app/sw.js): installable, stores nothing. */
+if ('serviceWorker' in navigator && window.isSecureContext) {
+  window.addEventListener('load', () => navigator.serviceWorker.register('sw.js').catch(() => {}));
+}
 </script>
 </body>
 </html>
