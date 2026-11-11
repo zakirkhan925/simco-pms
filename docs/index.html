@@ -13361,7 +13361,10 @@ async function pageCashAccount(root, accountId) {
       { key: 'Description', label: 'Detail', render: r =>
           UI.esc(r.Description || '') +
           (r.PayeeName ? ` <span class="muted">· ${UI.esc(r.PayeeName)}</span>` : '') +
-          (r.Category ? ` <span class="muted">· ${UI.esc(r.Category)}</span>` : '') },
+          (r.Category ? ` <span class="muted">· ${UI.esc(r.Category)}</span>` : '') +
+          // Spent on another of the custodian's projects (11 Nov 2026).
+          (r.ProjectName && String(r.ProjectID) !== String(a.ProjectID)
+            ? `<br><span class="chip">${UI.esc(r.ProjectName)}</span>` : '') },
       { key: 'In', label: 'In', align: 'right',
         render: r => r.Signed > 0 ? `<span class="num-pos">${cash(r.Amount)}</span>` : '' },
       { key: 'Out', label: 'Out', align: 'right',
@@ -13457,9 +13460,26 @@ function cashIssueDialog(accountId, position) {
 }
 
 async function cashSpendDialog(accountId, d) {
+  // A float may pay for each of its holder's projects (owner's request, 11 Nov
+  // 2026). The server sends the list; with one project there is nothing to choose.
+  const projects = d.projects || [];
+  const multi = projects.length > 1;
+  const proj = () => {
+    const el = document.querySelector('.modal [name="ProjectID"]');
+    return (el && el.value) || d.account.ProjectID;
+  };
   // Only approved bills with something still owing can be settled from the float.
-  const bills = (await api('listSubcontractorBills', { projectId: d.account.ProjectID, pageSize: 100 }))
-    .data.rows.filter(b => b.IsApproved && Number(b.Outstanding) > 0);
+  const billCache = {};
+  const billsFor = async pid => {
+    if (!billCache[pid]) {
+      try {
+        billCache[pid] = (await api('listSubcontractorBills', { projectId: pid, pageSize: 100 }))
+          .data.rows.filter(b => b.IsApproved && Number(b.Outstanding) > 0);
+      } catch (e) { billCache[pid] = []; }
+    }
+    return billCache[pid];
+  };
+  const bills = await billsFor(d.account.ProjectID);
   const advances = (d.advances || []).filter(a => Number(a.Outstanding) > 0);
 
   // Cash goes to subcontractors before there is a bill, so the firm is picked
@@ -13472,10 +13492,13 @@ async function cashSpendDialog(accountId, d) {
   ]);
   const vendors = vndRes.data.rows.filter(v => String(v.Status) !== 'Blacklisted');
   const subs = subRes.data.rows.filter(x => String(x.Status) !== 'Blacklisted');
-  const projectAgreements = agrRes.data.rows
-    .filter(a => String(a.ProjectID) === String(d.account.ProjectID));
+  const allAgreements = agrRes.data.rows;
 
-  const fields = [
+  const fields = (multi ? [
+    { name: 'ProjectID', label: 'Project', type: 'select', required: true, span: 2,
+      options: projects.map(p => ({ value: p.ProjectID, label: p.ProjectName || p.ProjectID })),
+      hint: 'The project this money was spent on. Its expenses are booked there when the report is approved.' }
+  ] : []).concat([
     { name: 'Type', label: 'What kind of payment?', type: 'select', required: true, span: 2,
       options: [
         { value: 'EXPENSE', label: 'Site expense' },
@@ -13523,10 +13546,10 @@ async function cashSpendDialog(accountId, d) {
     { name: 'PersonName', label: 'Person receiving it', hint: 'Not on the register: type the name. Link it to him later from his sheet.' },
     { name: 'PayeeName', label: 'Paid to', placeholder: 'Shop, driver, supplier…' },
     { name: 'Description', label: 'What was it for?', type: 'textarea', span: 2 }
-  ];
+  ]);
 
   const body = UI.el('div');
-  const form = UI.form(fields, { Type: 'EXPENSE' });
+  const form = UI.form(fields, { Type: 'EXPENSE', ProjectID: d.account.ProjectID });
   body.appendChild(form);
 
   // Each kind of payment needs a different handful of these fields.
@@ -13566,11 +13589,12 @@ async function cashSpendDialog(accountId, d) {
     const t = ptField.value;
     pidField.innerHTML = '<option value="">' + (t ? 'Not on the register' : 'Choose labour or employee first') + '</option>';
     if (t) {
-      if (!peopleCache[t]) {
-        try { peopleCache[t] = (await api('listPayrollPeople', d.account.ProjectID, t)).data; }
-        catch (e) { peopleCache[t] = []; }
+      const key = proj() + '|' + t;
+      if (!peopleCache[key]) {
+        try { peopleCache[key] = (await api('listPayrollPeople', proj(), t)).data; }
+        catch (e) { peopleCache[key] = []; }
       }
-      pidField.innerHTML += peopleCache[t].map(p => `<option value="${UI.esc(p.PersonID)}">` +
+      pidField.innerHTML += peopleCache[key].map(p => `<option value="${UI.esc(p.PersonID)}">` +
         UI.esc(p.Name + (p.Detail ? ' — ' + p.Detail : '')) + '</option>').join('');
     }
     applyPersonId();
@@ -13582,15 +13606,16 @@ async function cashSpendDialog(accountId, d) {
   // A vendor's open orders on this project, for an advance against one.
   const vField = form.querySelector('[name="VendorID"]');
   const poField = form.querySelector('[name="POID"]');
-  let projectPOs = null;
+  const poCache = {};
   const applyVendor = async () => {
     poField.innerHTML = '<option value="">Not against an order</option>';
     if (!vField.value) return;
-    if (projectPOs === null) {
-      try { projectPOs = (await api('listPurchaseOrders', { projectId: d.account.ProjectID, pageSize: 500, hideCancelled: true })).data.rows; }
-      catch (e) { projectPOs = []; }
+    const pid = proj();
+    if (!poCache[pid]) {
+      try { poCache[pid] = (await api('listPurchaseOrders', { projectId: pid, pageSize: 500, hideCancelled: true })).data.rows; }
+      catch (e) { poCache[pid] = []; }
     }
-    poField.innerHTML += projectPOs.filter(o => String(o.VendorID) === String(vField.value) && o.Status !== 'Cancelled')
+    poField.innerHTML += poCache[pid].filter(o => String(o.VendorID) === String(vField.value) && o.Status !== 'Cancelled')
       .map(o => `<option value="${UI.esc(o.POID)}">${UI.esc(o.POID + ' — ' + o.Status)}</option>`).join('');
   };
   vField.onchange = applyVendor;
@@ -13602,7 +13627,8 @@ async function cashSpendDialog(accountId, d) {
   const subField = form.querySelector('[name="SubcontractorID"]');
   const agrField = form.querySelector('[name="AgreementID"]');
   const applySub = () => {
-    const mine = projectAgreements.filter(a => String(a.SubcontractorID) === String(subField.value));
+    const mine = allAgreements.filter(a => String(a.ProjectID) === String(proj()) &&
+      String(a.SubcontractorID) === String(subField.value));
     agrField.innerHTML = '<option value="">Not against an agreement yet</option>' +
       mine.map(a => `<option value="${UI.esc(a.AgreementID)}">` +
         UI.esc((a.AgreementNumber || a.AgreementID) + ' — ' + (a.Scope || a.Status)) +
@@ -13612,12 +13638,28 @@ async function cashSpendDialog(accountId, d) {
   subField.onchange = applySub;
   applySub();
 
+  // Changing the project re-offers what belongs to it: bills, agreements, orders, people.
+  const projField = form.querySelector('[name="ProjectID"]');
+  if (projField) projField.onchange = async () => {
+    const billField = form.querySelector('[name="SubBillID"]');
+    const list = await billsFor(proj());
+    billField.innerHTML = list.map(b => `<option value="${UI.esc(b.SubBillID)}">` +
+      UI.esc(b.SubBillID + ' — ' + cash(b.Outstanding) + ' outstanding') + '</option>').join('');
+    const billRow = billField.closest('.field');
+    let hint = billRow && billRow.querySelector('.hint');
+    if (!hint && billRow) { hint = UI.el('div', { class: 'hint' }); billRow.appendChild(hint); }
+    if (hint) hint.textContent = list.length ? '' : 'No approved bills are outstanding on this project';
+    applySub();
+    applyVendor();
+    loadPeople();
+  };
+
   UI.modal({
     title: 'Record a payment from ' + accountId, body,
     footer: [
       { label: 'Cancel', onClick: m => m.close() },
       { label: 'Record', class: 'btn-primary', onClick: async m => {
-          const shown = ['Type', 'Amount', 'TxnDate'].concat(SHOW[typeField.value] || []);
+          const shown = ['ProjectID', 'Type', 'Amount', 'TxnDate'].concat(SHOW[typeField.value] || []);
           const data = UI.validate(form, fields.filter(f => shown.indexOf(f.name) !== -1));
           if (!data) return;
           data.Type = typeField.value;
@@ -13888,7 +13930,10 @@ async function pageCashReport(root, reportId) {
       { key: 'Type', label: 'Movement', width: '165px',
         render: x => UI.esc(CASH_TYPE_LABEL[x.Type] || x.Type) },
       { key: 'Description', label: 'Detail', render: x => UI.esc(x.Description || '') +
-          (x.PayeeName ? ` <span class="muted">· ${UI.esc(x.PayeeName)}</span>` : '') },
+          (x.PayeeName ? ` <span class="muted">· ${UI.esc(x.PayeeName)}</span>` : '') +
+          // Booked to another project than the float's (11 Nov 2026).
+          (x.ProjectName && String(x.ProjectID) !== String(d.account.ProjectID)
+            ? `<br><span class="chip">${UI.esc(x.ProjectName)}</span>` : '') },
       { key: 'Category', label: 'Category', width: '130px',
         render: x => x.Category ? UI.esc(x.Category) : '<span class="muted">—</span>' },
       { key: 'Amount', label: 'Amount', align: 'right',
