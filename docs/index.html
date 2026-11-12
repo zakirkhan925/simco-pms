@@ -5958,6 +5958,64 @@ async function openDebitNoteForm(vendor, onSaved) {
   });
 }
 
+/** Which debit note: for goods sent back, or a recovery for damage, wastage or a penalty (12 Nov 2026). */
+function chooseDebitNoteKind(vendor, page, onSaved) {
+  // A server without recovery debit notes does not send this: offer goods returns only.
+  if (!('pendingDebitNotes' in page)) { openDebitNoteForm(vendor, onSaved); return; }
+  const body = UI.el('div');
+  body.innerHTML = `<p style="margin:0 0 12px">What is this debit note for?</p>
+    <div style="display:grid;gap:10px">
+      <button class="btn" id="dnReturns" style="text-align:left;padding:12px"><strong>Goods returned</strong><br>
+        <span class="muted">Against goods returns already recorded in Inventory. Posted at once.</span></button>
+      <button class="btn" id="dnRecovery" style="text-align:left;padding:12px"><strong>Recovery: damage, wastage, penalty</strong><br>
+        <span class="muted">No goods returned. Raised with the reason, approved by a purchase-order approver, then a credit on the account.</span></button>
+    </div>`;
+  const m = UI.modal({ title: 'Debit note — ' + vendor.CompanyName, body, footer: [{ label: 'Cancel', onClick: mm => mm.close() }] });
+  body.querySelector('#dnReturns').onclick = () => { m.close(); openDebitNoteForm(vendor, onSaved); };
+  body.querySelector('#dnRecovery').onclick = () => { m.close(); openRecoveryDebitNoteForm(vendor, page, onSaved); };
+}
+
+async function openRecoveryDebitNoteForm(vendor, page, onSaved) {
+  let projects = [];
+  try { projects = (await api('listProjects', { pageSize: 300 })).data.rows; } catch (e) { projects = []; }
+  const orders = (page.purchaseOrders || []).filter(o => ['Cancelled', 'Draft'].indexOf(o.Status) === -1);
+  const fields = [
+    { name: 'Category', label: 'What is being recovered', type: 'select', required: true,
+      options: [{ value: '', label: '— choose —' }].concat((page.recoveryCategories || []).map(c => ({ value: c, label: c }))) },
+    { name: 'POID', label: 'Against order (optional)', type: 'select',
+      options: [{ value: '', label: '—' }].concat(orders.map(o => ({ value: o.POID, label: o.POID + ' — ' + (o.ProjectName || o.ProjectID) }))),
+      hint: 'An order brings its own project.' },
+    { name: 'ProjectID', label: 'Project', type: 'select',
+      options: [{ value: '', label: '— choose —' }].concat(projects.map(p => ({ value: p.ProjectID, label: p.ProjectName }))) },
+    { name: 'NoteDate', label: 'Date', type: 'date', required: true, value: new Date().toISOString().slice(0, 10) },
+    { name: 'Amount', label: 'Amount to recover', type: 'number', required: true },
+    { name: 'Reference', label: 'Reference', placeholder: 'Site report, photos, letter…' },
+    { name: 'Remarks', label: 'What happened, and how the amount was worked out', type: 'textarea', span: 2, required: true }
+  ];
+  const form = UI.form(fields);
+  UI.modal({
+    title: 'Recovery debit note — ' + vendor.CompanyName, size: 'wide', body: form,
+    footer: [
+      { label: 'Cancel', onClick: m => m.close() },
+      { label: 'Raise for approval', class: 'btn-primary', onClick: async m => {
+        const data = UI.validate(form, fields);
+        if (!data) return;
+        if (!data.POID && !data.ProjectID) { UI.warn('Choose the project, or the order it is against.'); return; }
+        if (data.POID) { const o = orders.find(x => x.POID === data.POID); if (o) data.ProjectID = o.ProjectID; }
+        data.VendorID = vendor.VendorID;
+        data.NoteType = 'Recovery';
+        m.busy(true);
+        try {
+          const res = await api('recordDebitNote', data);
+          m.close(); UI.success('Raised', res.message);
+          if (onSaved) onSaved();
+        } catch (e) { UI.error('Not raised', e.message); }
+        finally { m.busy(false); }
+      }}
+    ]
+  });
+}
+
 /** A debit note, opened from the statement: its returns, and cancel. */
 async function openDebitNote(noteId, onDone) {
   let d;
@@ -5974,12 +6032,28 @@ async function openDebitNote(noteId, onDone) {
       <dt>Date</dt><dd>${UI.esc(UI.fmt.date(n.NoteDate))}</dd>
       <dt>Reference</dt><dd>${UI.esc(n.Reference || '—')}</dd>
       <dt>Amount</dt><dd><strong>${UI.fmt.money(n.Amount, sym)}</strong></dd>
-      <dt>Status</dt><dd>${UI.badge(n.Status, n.Status === 'Posted' ? 'green' : 'grey')}</dd>
+      <dt>Status</dt><dd>${UI.badge(n.Status, n.Status === 'Posted' ? 'green' : n.Status === 'Pending Approval' ? 'amber' : 'grey')}</dd>
+      ${n.NoteType === 'Recovery' ? `<dt>Recovery for</dt><dd>${UI.esc(n.Category)}${n.POID ? ' · ' + UI.esc(n.POID) : ''}</dd>
+        <dt>What happened</dt><dd>${UI.esc(n.Remarks || '—')}</dd>` : ''}
+      ${n.DecisionRemarks ? `<dt>Decision</dt><dd>${UI.esc(n.DecisionRemarks)}</dd>` : ''}
     </dl>
-    <table class="data mt-8"><thead><tr><th>Return</th><th>Receipt</th><th>Date</th><th>Reason</th><th class="r">Value</th></tr></thead>
+    ${n.NoteType === 'Recovery' ? '' : `<table class="data mt-8"><thead><tr><th>Return</th><th>Receipt</th><th>Date</th><th>Reason</th><th class="r">Value</th></tr></thead>
       <tbody>${d.returns.map(r => `<tr><td class="mono">${UI.esc(r.VendorReturnID)}</td><td class="mono">${UI.esc(r.GRNID)}</td>
-        <td>${UI.esc(UI.fmt.date(r.ReturnDate))}</td><td>${UI.esc(r.Reason)}</td><td class="r">${UI.fmt.money(r.Amount, sym)}</td></tr>`).join('')}</tbody></table>`;
+        <td>${UI.esc(UI.fmt.date(r.ReturnDate))}</td><td>${UI.esc(r.Reason)}</td><td class="r">${UI.fmt.money(r.Amount, sym)}</td></tr>`).join('')}</tbody></table>`}`;
   const footer = [{ label: 'Close', onClick: m => m.close() }];
+  if (d.canDecide) {
+    footer.push({ label: 'Reject', onClick: m => {
+      m.close();
+      openReasonModal({ title: 'Reject debit note ' + noteId, label: 'Why is it rejected?', confirmLabel: 'Reject', danger: true,
+        intro: 'It will not count against the vendor.',
+        onConfirm: async reason => { const res = await api('decideDebitNote', noteId, 'REJECT', reason); UI.success('Rejected', res.message); if (onDone) onDone(); } });
+    }});
+    footer.push({ label: 'Approve', class: 'btn-primary', onClick: async m => {
+      m.busy(true);
+      try { const res = await api('decideDebitNote', noteId, 'APPROVE', ''); m.close(); UI.success('Approved', res.message); if (onDone) onDone(); }
+      catch (e) { m.busy(false); UI.error('Not approved', e.message); }
+    }});
+  }
   if (d.canCancel) footer.push({ label: 'Cancel debit note', class: 'btn-danger', onClick: m => {
     m.close();
     openReasonModal({
@@ -6012,8 +6086,10 @@ async function openSetPaymentProject(entry, onSaved) {
        <tbody id="spRows"></tbody></table>
      <button class="btn btn-sm mt-8" id="spAdd" type="button">+ Split to another project</button>
      <div class="muted" style="margin-top:8px;font-size:12.5px" id="spSum"></div>
-     <label class="checkbox mt-16" style="display:block"><input type="checkbox" id="spOpening"${/opening/i.test(entry.document || '') ? ' checked' : ''}>
+     <label class="checkbox mt-16" style="display:block"><input type="checkbox" id="spOpening">
        This payment cleared dues from before PMS: post them as an opening balance on the same project(s)</label>
+     <div class="muted" style="font-size:12px;margin:2px 0 0 22px">Leave it unticked for an advance, or when the vendor’s
+       bills for these goods will be entered against their orders.</div>
      <div class="field mt-16"><label for="spReason">Reason *</label>
        <textarea class="input" id="spReason" placeholder="For example: per Ali Hassan, old dues on Askari 14 JV"></textarea></div>`;
   const tbody = body.querySelector('#spRows');
@@ -6162,6 +6238,10 @@ async function pageVendorProfile(root, vendorId) {
     pageHead(v.CompanyName, `${v.Category} · ${v.VendorID}${v.City ? ' · ' + v.City : ''}`, actions.join('')) +
     (v.Status === 'Blacklisted' ? `<div class="banner banner-warn"><div><strong>This vendor is blacklisted.</strong>
        They are excluded from RFQ shortlists.</div></div>` : '') +
+    ((d.pendingDebitNotes || []).length ? `<div class="banner banner-warn"><div><strong>Debit notes awaiting approval:</strong>
+       ${d.pendingDebitNotes.map(n => `<button class="btn btn-sm" data-dn-open="${UI.esc(n.DebitNoteID)}" style="margin:2px 4px">
+         ${UI.esc(n.DebitNoteID)} · ${UI.esc(n.Category)} · ${UI.esc(UI.fmt.money(n.Amount, sym))} · ${UI.esc(n.ProjectName)}</button>`).join('')}
+       <span class="muted">They count against what the vendor is owed once approved.</span></div></div>` : '') +
     `<div class="stat-grid">
        ${[['Rating', s.evaluations ? s.rating.toFixed(2) + ' / 5' : 'Not rated',
            s.evaluations + ' evaluation(s)'],
@@ -6251,7 +6331,10 @@ async function pageVendorProfile(root, vendorId) {
   const vp = document.getElementById('vendorPay');
   if (vp) vp.onclick = () => openVendorPaymentForm(v, () => loadVendorLedger(vendorId));
   const vd = document.getElementById('vendorDebitNote');
-  if (vd) vd.onclick = () => openDebitNoteForm(v, () => loadVendorLedger(vendorId));
+  if (vd) vd.onclick = () => chooseDebitNoteKind(v, d, () => pageVendorProfile(root, vendorId));
+  root.querySelectorAll('[data-dn-open]').forEach(b => {
+    b.onclick = () => openDebitNote(b.dataset.dnOpen, () => pageVendorProfile(root, vendorId));
+  });
   ['ledApply'].forEach(id => {
     const b = document.getElementById(id);
     if (b) b.onclick = () => loadVendorLedger(vendorId);
@@ -12593,6 +12676,12 @@ async function pageAgreement(root, agreementId) {
      ${(d.retentionReleases || []).length ? `<div class="card" style="margin-top:16px">
        <div class="card-head"><h3>Retention released</h3></div>
        <div id="agrReleases"></div>
+     </div>` : ''}
+     ${(d.recoveryNotes || []).length || d.canRaiseRecovery ? `<div class="card" style="margin-top:16px">
+       <div class="card-head"><h3>Recovery notes</h3>
+         <span class="muted" style="font-size:12.5px">damage, wastage or penalty — approved, then taken off the next bills</span>
+         ${d.canRaiseRecovery ? `<button class="btn btn-sm" id="agrRecovery">+ Recovery note</button>` : ''}</div>
+       <div id="agrRecoveries"></div>
      </div>` : ''}`;
 
   renderAgreementLines(document.getElementById('agrLineTable'), d);
@@ -12655,6 +12744,39 @@ async function pageAgreement(root, agreementId) {
     el.onclick = e => { e.preventDefault(); navigate('subbill', el.dataset.bill); };
   });
   renderApprovalTimeline(document.getElementById('agrHistory'), d.approvals);
+  const recHost = document.getElementById('agrRecoveries');
+  if (recHost) {
+    const tone = { 'Pending Approval': 'amber', Approved: 'blue', Rejected: 'red', Cancelled: 'grey' };
+    UI.table(recHost, {
+      columns: [
+        { key: 'RecoveryNoteID', label: 'Note', render: r => `<span class="mono">${UI.esc(r.RecoveryNoteID)}</span>` },
+        { key: 'NoteDate', label: 'Date', render: r => UI.fmt.date(r.NoteDate) },
+        { key: 'Category', label: 'For' },
+        { key: 'Description', label: 'What happened' },
+        { key: 'Amount', label: 'Amount', align: 'right', render: r => cash(r.Amount) },
+        { key: 'Recovered', label: 'Recovered', align: 'right', render: r => cash(r.Recovered) },
+        { key: 'Outstanding', label: 'Still to recover', align: 'right', render: r => r.Outstanding ? `<strong>${cash(r.Outstanding)}</strong>` : '—' },
+        { key: 'Status', label: 'Status', render: r => UI.badge(r.Status, tone[r.Status]) +
+            (r.DecisionRemarks ? `<br><span class="muted" style="font-size:12px">${UI.esc(r.DecisionRemarks)}</span>` : '') },
+        { key: 'x', label: '', align: 'right', render: r =>
+            (r.CanDecide ? `<button class="btn btn-sm btn-primary" data-recok="${UI.esc(r.RecoveryNoteID)}">Approve</button>
+               <button class="btn btn-sm" data-recno="${UI.esc(r.RecoveryNoteID)}">Reject</button> ` : '') +
+            (r.CanCancel ? `<button class="btn btn-sm btn-ghost" data-reccancel="${UI.esc(r.RecoveryNoteID)}">Cancel</button>` : '') }
+      ],
+      rows: d.recoveryNotes || [],
+      empty: UI.emptyState('No recovery notes', 'Raise one when the subcontractor damages, wastes or delays, with the reason and amount.')
+    });
+    const back = () => navigate('agreement', agreementId);
+    recHost.querySelectorAll('[data-recok]').forEach(b => { b.onclick = async () => {
+      try { UI.success('Approved', (await api('decideSubRecoveryNote', b.dataset.recok, 'APPROVE', '')).message); back(); }
+      catch (e) { UI.error('Not approved', e.message); } }; });
+    recHost.querySelectorAll('[data-recno]').forEach(b => { b.onclick = () => openReasonModal({
+      title: 'Reject ' + b.dataset.recno, label: 'Why is it rejected?', confirmLabel: 'Reject', danger: true, intro: 'Nothing is deducted.',
+      onConfirm: async reason => { UI.success('Rejected', (await api('decideSubRecoveryNote', b.dataset.recno, 'REJECT', reason)).message); back(); } }); });
+    recHost.querySelectorAll('[data-reccancel]').forEach(b => { b.onclick = () => openReasonModal({
+      title: 'Cancel ' + b.dataset.reccancel, label: 'Why is it cancelled?', confirmLabel: 'Cancel it', danger: true, intro: 'It stays on record, marked Cancelled.',
+      onConfirm: async reason => { UI.success('Cancelled', (await api('cancelSubRecoveryNote', b.dataset.reccancel, reason)).message); back(); } }); });
+  }
 
   const on = (id, fn) => { const b = document.getElementById(id); if (b) b.onclick = fn; };
   on('agrEdit', () => agreementForm(a, a.SubcontractorID, () => navigate('agreement', agreementId)));
@@ -12662,6 +12784,7 @@ async function pageAgreement(root, agreementId) {
     () => navigate('agreement', agreementId),
     { locked: d.canChangeRates === false, approved: ['Draft', 'Returned'].indexOf(a.Status) === -1 }));
   on('agrBillBtn', () => subBillForm(agreementId, d, () => navigate('agreement', agreementId)));
+  on('agrRecovery', () => subRecoveryForm(agreementId, d, () => navigate('agreement', agreementId)));
   on('agrStatusBtn', () => agreementStatusDialog(agreementId, d.allowedTransitions));
   on('agrSubmit', async () => {
     try { UI.success((await api('submitAgreement', agreementId)).message); navigate('agreement', agreementId); }
@@ -12820,6 +12943,35 @@ function agreementStatusDialog(agreementId, allowed) {
  * quantities are taken back out of the "previous" column — otherwise a line
  * would appear to have been billed twice and the balance would read short.
  */
+/** Raise a recovery note: damage, wastage or a penalty, deducted from the next bills once approved. */
+function subRecoveryForm(agreementId, d, onSaved) {
+  const fields = [
+    { name: 'Category', label: 'What is being recovered', type: 'select', required: true,
+      options: [{ value: '', label: '— choose —' }].concat((d.recoveryCategories || []).map(c => ({ value: c, label: c }))) },
+    { name: 'NoteDate', label: 'Date', type: 'date', required: true, value: new Date().toISOString().slice(0, 10) },
+    { name: 'Amount', label: 'Amount to recover', type: 'number', required: true },
+    { name: 'Description', label: 'What happened, and how the amount was worked out', type: 'textarea', span: 2, required: true }
+  ];
+  const body = UI.el('div');
+  body.innerHTML = `<p class="muted" style="margin:0 0 12px;font-size:13px">An approver (QS, HO Accountant, PM or Management)
+    approves it; it is then taken off this agreement's next bills until recovered.</p>`;
+  const form = UI.form(fields);
+  body.appendChild(form);
+  UI.modal({
+    title: 'Recovery note — ' + agreementId, body,
+    footer: [
+      { label: 'Cancel', onClick: m => m.close() },
+      { label: 'Raise for approval', class: 'btn-primary', onClick: async m => {
+        const data = UI.validate(form, fields);
+        if (!data) return;
+        m.busy(true);
+        try { const res = await api('createSubRecoveryNote', agreementId, data); m.close(); UI.success('Raised', res.message); if (onSaved) onSaved(); }
+        catch (e) { m.busy(false); UI.error('Not raised', e.message); }
+      }}
+    ]
+  });
+}
+
 async function subBillForm(agreementId, agreementData, onSaved, existing) {
   const p = agreementData.position, a = agreementData.agreement;
   const editing = !!existing;
@@ -12838,6 +12990,8 @@ async function subBillForm(agreementId, agreementData, onSaved, existing) {
   });
   const measured = allItems.filter(i => Number(i.BalanceQty) > 0 || Number(i.PreviousQty) > 0);
   const isMeasured = allItems.length > 0;
+  // Approved recovery notes still to come off (12 Nov 2026); a bill being corrected gets its own back.
+  const recAvail = Number(agreementData.recoveryPendingTotal || 0) + (editing ? Number(existing.bill.OtherRecovery || 0) : 0);
   // Owed (or to come back) on work billed before a rate changed: it goes on this bill.
   const revisions = allItems.filter(i => Number(i.RateDifference || 0) !== 0);
   const revisionTotal = revisions.reduce((t, i) => t + Number(i.RateDifference), 0);
@@ -12853,6 +13007,11 @@ async function subBillForm(agreementId, agreementData, onSaved, existing) {
       hint: p.advanceOutstanding > 0
         ? 'Leave blank to recover the standard share. ' + cash(p.advanceOutstanding) + ' outstanding.'
         : 'No advance outstanding' },
+  ]).concat(!('recoveryPendingTotal' in agreementData) ? [] : [
+    { name: 'OtherRecovery', label: 'Recovery (damage / wastage / penalty)', type: 'number',
+      hint: recAvail > 0 ? 'Leave blank to recover the approved notes, ' + cash(recAvail) + ', up to what this bill leaves payable.'
+        : 'No approved recovery notes outstanding' }
+  ]).concat([
     { name: 'TaxPercent', label: 'Tax %', type: 'number', value: 0 },
     { name: 'BillDate', label: 'Bill date', type: 'date', value: new Date().toISOString().slice(0, 10) }
   ]);
@@ -12863,6 +13022,7 @@ async function subBillForm(agreementId, agreementData, onSaved, existing) {
     PeriodTo: (existing.bill.PeriodTo || '').slice(0, 10),
     GrossAmount: existing.bill.GrossAmount,
     AdvanceRecovery: existing.bill.AdvanceRecovery,
+    OtherRecovery: existing.bill.OtherRecovery || '',
     TaxPercent: existing.bill.TaxPercent,
     BillDate: (existing.bill.BillDate || '').slice(0, 10)
   } : {};
@@ -12953,13 +13113,17 @@ async function subBillForm(agreementId, agreementData, onSaved, existing) {
           gross * Number(App.settings['finance.advanceRecoveryPercent'] || 20) / 100)
       : Number(v.AdvanceRecovery || 0);
     const tax = gross * Number(v.TaxPercent || 0) / 100;
-    const net = gross - retention - advance + tax;
+    const before = gross - retention - advance + tax;
+    const other = (v.OtherRecovery === '' || v.OtherRecovery === undefined)
+      ? Math.max(0, Math.min(recAvail, before)) : Number(v.OtherRecovery || 0);
+    const net = before - other;
     preview.innerHTML =
       '<div><span>Work done</span><span id="billGross">' + cash(gross) + '</span></div>' +
       '<div><span>Less retention (' + Number(a.RetentionPercent || 0) + '%)</span>' +
         '<span id="billRet">−' + cash(retention) + '</span></div>' +
       '<div><span>Less advance recovery</span><span id="billAdv">−' + cash(advance) + '</span></div>' +
       (tax ? '<div><span>Plus tax</span><span>+' + cash(tax) + '</span></div>' : '') +
+      (other ? '<div><span>Less recovery (damage / penalty)</span><span id="billOther">−' + cash(other) + '</span></div>' : '') +
       '<div class="grand"><span>Net payable</span>' +
         '<strong id="billNet">' + cash(net) + '</strong></div>' +
       (gross > p.remaining
@@ -13067,6 +13231,7 @@ async function pageSubBill(root, billId) {
              <div><span>Work done this period</span><span id="sbGross">${cash(b.GrossAmount)}</span></div>
              <div><span>Less retention</span><span id="sbRet">−${cash(b.RetentionAmount)}</span></div>
              <div><span>Less advance recovery</span><span id="sbAdv">−${cash(b.AdvanceRecovery)}</span></div>
+             ${b.OtherRecovery ? `<div><span>Less recovery (damage / penalty)</span><span>−${cash(b.OtherRecovery)}</span></div>` : ''}
              ${b.TaxAmount ? `<div><span>Plus tax</span><span>+${cash(b.TaxAmount)}</span></div>` : ''}
              <div class="grand"><span>Net payable</span><strong id="sbNet">${cash(b.NetPayable)}</strong></div>
              <div><span>Paid to date</span><span id="sbPaid">${cash(d.paidToDate)}</span></div>
@@ -17058,6 +17223,7 @@ const PRINT_BODIES = {
         <tr><td>Work done this period</td><td class="r">${money(b.GrossAmount)}</td></tr>
         <tr><td>Less retention</td><td class="r">− ${n(b.RetentionAmount)}</td></tr>
         <tr><td>Less advance recovery</td><td class="r">− ${n(b.AdvanceRecovery)}</td></tr>
+        ${Number(b.OtherRecovery) ? `<tr><td>Less recovery (damage / wastage / penalty)</td><td class="r">− ${n(b.OtherRecovery)}</td></tr>` : ''}
         ${Number(b.TaxAmount) ? `<tr><td>Add tax</td><td class="r">${n(b.TaxAmount)}</td></tr>` : ''}
         <tr class="total"><td>Net payable</td><td class="r">${money(b.NetPayable)}</td></tr>
         ${paid ? `<tr><td>Paid to date</td><td class="r">${money(paid)}</td></tr>
