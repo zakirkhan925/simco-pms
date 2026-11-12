@@ -6160,9 +6160,6 @@ async function openVendorPaymentForm(vendor, onSaved) {
       options: [{ value: '', label: '— choose —' }, { value: 'HEAD_OFFICE', label: 'Head office (no project)' }]
         .concat(projects.map(p => ({ value: p.ProjectID, label: p.ProjectName }))),
       hint: 'An invoice or an order brings its own project. Otherwise say which project this money is for, or Head office.' },
-    { name: 'ClearsOpeningBalance', label: 'This pays dues from before PMS (post them as an opening balance)', type: 'checkbox', span: 2 },
-    { name: 'OpeningAsOf', label: 'Those dues stood as at (optional)', type: 'date',
-      hint: 'Left blank: the payment date. Only when the box above is ticked.' },
     { name: 'PaymentDate', label: 'Payment date', type: 'date', required: true,
       value: new Date().toISOString().slice(0, 10) },
     { name: 'Amount', label: 'Amount', type: 'number', required: true },
@@ -6190,10 +6187,6 @@ async function openVendorPaymentForm(vendor, onSaved) {
         const data = UI.validate(form, fields);
         if (!data) return;
         data.VendorID = vendor.VendorID;
-        if (data.ClearsOpeningBalance && (data.SupplierInvoiceID || data.POID)) {
-          UI.warn('Dues from before PMS are not against an invoice or an order: leave those blank.');
-          return;
-        }
         if (data.SupplierInvoiceID) { data.POID = ''; data.ProjectID = ''; }   // the invoice names its own
         else if (data.POID) {
           const o = orders.find(x => x.POID === data.POID);
