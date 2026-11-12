@@ -5517,7 +5517,8 @@ async function loadVendorLedger(vendorId) {
     if (sel && !projectId) {
       const seen = new Map();
       d.entries.forEach(e => { if (e.projectId && !seen.has(e.projectId)) seen.set(e.projectId, e.project || e.projectId); });
-      sel.innerHTML = '<option value="">All projects</option>' + Array.from(seen.entries())
+      sel.innerHTML = '<option value="">All projects</option>' +
+        (d.entries.some(e => e.headOffice) ? '<option value="HEAD_OFFICE">Head office</option>' : '') + Array.from(seen.entries())
         .sort((x, y) => String(x[1]).localeCompare(String(y[1])))
         .map(([id, name]) => `<option value="${UI.esc(id)}">${UI.esc(name)}</option>`).join('');
       sel.value = '';
@@ -5527,10 +5528,12 @@ async function loadVendorLedger(vendorId) {
     document.getElementById('vendorLedgerSummary').innerHTML =
       `<div class="ledger-figures">
         ${[['Opening', UI.fmt.money(d.openingBalance, sym)],
-           ['Invoiced', UI.fmt.money(s.invoiced, sym)],
+           ['Invoiced', UI.fmt.money(s.invoiced, sym)]]
+          .concat(s.openingDues ? [['Owed before PMS', UI.fmt.money(s.openingDues, sym)]] : [])
+          .concat([
            ['Paid', UI.fmt.money(s.paid, sym)],
            ['Balance owed', UI.fmt.money(s.closingBalance, sym), 'strong'],
-           ['Received, not billed', UI.fmt.money(s.receivedNotInvoiced, sym)]]
+           ['Received, not billed', UI.fmt.money(s.receivedNotInvoiced, sym)]])
           .map(t => `<div class="ledger-figure${t[2] ? ' is-total' : ''}">
             <span>${UI.esc(t[0])}</span><strong>${UI.esc(t[1])}</strong></div>`).join('')}
       </div>`;
@@ -5546,7 +5549,8 @@ async function loadVendorLedger(vendorId) {
         { key: 'date', label: 'Date', width: '96px', render: r =>
           r.opening ? '' : UI.fmt.date(r.date) },
         { key: 'type', label: 'Type', width: '92px', render: r =>
-          r.opening ? '' : UI.badge(r.type, r.type === 'Invoice' ? 'amber' : r.type === 'Debit note' ? 'violet' : 'green') },
+          r.opening ? '' : UI.badge(r.type, r.type === 'Invoice' ? 'amber' : r.type === 'Debit note' ? 'violet'
+            : r.type === 'Opening balance' ? 'blue' : 'green') },
         { key: 'ref', label: 'Reference', width: '130px', render: r =>
           r.opening ? '' :
           // The reference is what someone reads out on the phone, so it is
@@ -5556,7 +5560,8 @@ async function loadVendorLedger(vendorId) {
         { key: 'description', label: 'Particulars', render: r =>
           r.opening ? `<em>${UI.esc(r.description)}</em>` : UI.esc(r.description) },
         { key: 'project', label: 'Project', render: r =>
-          r.opening ? '' : r.project ? UI.esc(r.project) : '<span class="muted">—</span>' },
+          r.opening ? '' : r.unassigned ? UI.badge('Not set', 'amber')
+            : r.project ? UI.esc(r.project) : '<span class="muted">—</span>' },
         { key: 'debit', label: 'Debit', align: 'right', width: '108px', render: r =>
           r.debit ? UI.fmt.number(r.debit) : '<span class="muted">—</span>' },
         { key: 'credit', label: 'Credit', align: 'right', width: '108px', render: r =>
@@ -5568,7 +5573,9 @@ async function loadVendorLedger(vendorId) {
         { key: 'actions', label: '', align: 'right', width: '92px', render: r =>
           r.opening ? ''
             : r.type === 'Payment'
-            ? `<div class="row-actions"><button class="btn btn-sm"
+            ? `<div class="row-actions">` +
+              (r.canReassign ? `<button class="btn btn-sm" data-setproj="${UI.esc(r.ref)}">Set project</button> ` : '') +
+              `<button class="btn btn-sm"
                  data-voucher="${UI.esc(r.ref)}">Voucher</button>` +
               // A payment or advance keyed wrong is reversed, not deleted (24 Oct 2026).
               (can('vendor.pay') ? ` <button class="btn btn-sm btn-danger" data-revpay="${UI.esc(r.ref)}">Reverse</button>` : '') +
@@ -5576,6 +5583,9 @@ async function loadVendorLedger(vendorId) {
             : r.type === 'Debit note'
             ? `<div class="row-actions"><button class="btn btn-sm"
                  data-debitnote="${UI.esc(r.ref)}">Open</button></div>`
+            : r.type === 'Opening balance'
+            ? (d.canOpening ? `<div class="row-actions"><button class="btn btn-sm btn-ghost"
+                 data-cancelob="${UI.esc(r.ref)}">Cancel</button></div>` : '')
             : `<div class="row-actions"><button class="btn btn-sm"
                  data-invoice="${UI.esc(r.ref)}">Open</button></div>` }
       ],
@@ -5607,6 +5617,21 @@ async function loadVendorLedger(vendorId) {
     });
     host.querySelectorAll('[data-invoice]').forEach(b => {
       b.onclick = () => openSupplierInvoice(b.dataset.invoice, () => loadVendorLedger(vendorId));
+    });
+    host.querySelectorAll('[data-setproj]').forEach(b => {
+      b.onclick = () => openSetPaymentProject(d.entries.find(x => x.ref === b.dataset.setproj), () => loadVendorLedger(vendorId));
+    });
+    host.querySelectorAll('[data-cancelob]').forEach(b => {
+      b.onclick = () => openReasonModal({
+        title: 'Cancel opening balance ' + b.dataset.cancelob, label: 'Why is it being cancelled?',
+        confirmLabel: 'Cancel it', danger: true,
+        intro: 'It leaves the statement and what is owed. It stays on record, marked Cancelled.',
+        onConfirm: async reason => {
+          const res = await api('cancelVendorOpeningBalance', b.dataset.cancelob, reason);
+          UI.success('Cancelled', res.message);
+          loadVendorLedger(vendorId);
+        }
+      });
     });
     host.querySelectorAll('[data-debitnote]').forEach(b => {
       b.onclick = () => openDebitNote(b.dataset.debitnote, () => loadVendorLedger(vendorId));
@@ -5970,6 +5995,68 @@ async function openDebitNote(noteId, onDone) {
   UI.modal({ title: 'Debit note ' + noteId, size: 'wide', body, footer });
 }
 
+/** Set the project of a payment, or split it across projects (owner, 12 Nov 2026; administrators). */
+async function openSetPaymentProject(entry, onSaved) {
+  if (!entry) return;
+  let projects = [];
+  try { projects = (await api('listProjects', { pageSize: 300 })).data.rows; } catch (e) { projects = []; }
+  const opts = '<option value="">— choose —</option><option value="HEAD_OFFICE">Head office (no project)</option>' +
+    projects.map(p => `<option value="${UI.esc(p.ProjectID)}">${UI.esc(p.ProjectName)}</option>`).join('');
+  const sym = App.settings.currencySymbol || 'Rs';
+  const body = UI.el('div');
+  body.innerHTML =
+    `<p class="muted" style="margin:0 0 12px;font-size:13px"><strong>${UI.esc(entry.ref)}</strong> · ${UI.esc(entry.document || '')}
+       · ${UI.esc(UI.fmt.date(entry.date))} · <strong>${UI.esc(UI.fmt.money(entry.credit, sym))}</strong>.
+       Choose its project. If one cheque paid for several projects, split it: the parts must add up to the payment.</p>
+     <table class="lines"><thead><tr><th>Project</th><th class="num" style="width:160px">Amount</th><th></th></tr></thead>
+       <tbody id="spRows"></tbody></table>
+     <button class="btn btn-sm mt-8" id="spAdd" type="button">+ Split to another project</button>
+     <div class="muted" style="margin-top:8px;font-size:12.5px" id="spSum"></div>
+     <label class="checkbox mt-16" style="display:block"><input type="checkbox" id="spOpening"${/opening/i.test(entry.document || '') ? ' checked' : ''}>
+       This payment cleared dues from before PMS: post them as an opening balance on the same project(s)</label>
+     <div class="field mt-16"><label for="spReason">Reason *</label>
+       <textarea class="input" id="spReason" placeholder="For example: per Ali Hassan, old dues on Askari 14 JV"></textarea></div>`;
+  const tbody = body.querySelector('#spRows');
+  const sum = () => {
+    const amts = [...tbody.querySelectorAll('[data-amt]')].map(i => Number(i.value || 0));
+    const t = amts.reduce((a, b) => a + b, 0);
+    body.querySelector('#spSum').textContent = amts.length > 1
+      ? 'Parts: ' + UI.fmt.money(t, sym) + ' of ' + UI.fmt.money(entry.credit, sym) : '';
+  };
+  const addRow = (amount) => {
+    const tr = UI.el('tr');
+    tr.innerHTML = `<td><select class="input" data-proj>${opts}</select></td>
+      <td><input class="input num" type="number" step="any" min="0" data-amt value="${amount === undefined ? '' : amount}"></td>
+      <td><button class="line-drop" type="button" title="Remove">×</button></td>`;
+    tbody.appendChild(tr);
+    tr.querySelector('[data-amt]').oninput = sum;
+    tr.querySelector('.line-drop').onclick = () => { if (tbody.children.length > 1) { tr.remove(); sum(); } };
+  };
+  addRow(entry.credit);
+  body.querySelector('#spAdd').onclick = () => { addRow(''); sum(); };
+  UI.modal({
+    title: 'Set project — ' + entry.ref, body, size: 'wide',
+    footer: [
+      { label: 'Cancel', onClick: m => m.close() },
+      { label: 'Save', class: 'btn-primary', onClick: async m => {
+        const parts = [...tbody.querySelectorAll('tr')].map(tr => ({
+          ProjectID: tr.querySelector('[data-proj]').value, Amount: tr.querySelector('[data-amt]').value }));
+        if (parts.some(x => !x.ProjectID)) { UI.warn('Choose a project (or Head office) on every line.'); return; }
+        const reason = body.querySelector('#spReason').value.trim();
+        if (!reason) { UI.warn('Give the reason.'); return; }
+        m.busy(true);
+        try {
+          const res = await api('setVendorPaymentProject', entry.ref,
+            { parts, Reason: reason, ClearsOpeningBalance: body.querySelector('#spOpening').checked });
+          m.close(); UI.success('Saved', res.message);
+          if (onSaved) onSaved();
+        } catch (e) { UI.error('Not saved', e.message); }
+        finally { m.busy(false); }
+      }}
+    ]
+  });
+}
+
 async function openVendorPaymentForm(vendor, onSaved) {
   let open = [];
   try {
@@ -5983,6 +6070,9 @@ async function openVendorPaymentForm(vendor, onSaved) {
     orders = (await api('listPurchaseOrders', { vendorId: vendor.VendorID, pageSize: 200 })).data.rows
       .filter(o => ['Cancelled', 'Draft'].indexOf(o.Status) === -1);
   } catch (e) { /* the advance can still be recorded without an order */ }
+  // Every payment names a project or head office (owner, 12 Nov 2026).
+  let projects = [];
+  try { projects = (await api('listProjects', { pageSize: 300 })).data.rows; } catch (e) { projects = []; }
 
   const sym = App.settings.currencySymbol || 'Rs';
   const fields = [
@@ -5994,6 +6084,13 @@ async function openVendorPaymentForm(vendor, onSaved) {
       options: [{ value: '', label: '—' }].concat(orders.map(o => ({ value: o.POID,
         label: o.POID + ' — ' + (o.ProjectName || o.ProjectID) + ' · ' + UI.fmt.money(o.Total, sym) }))),
       hint: 'For an advance only. Its project is taken from the order.' },
+    { name: 'ProjectID', label: 'Project (when not against an invoice or order)', type: 'select',
+      options: [{ value: '', label: '— choose —' }, { value: 'HEAD_OFFICE', label: 'Head office (no project)' }]
+        .concat(projects.map(p => ({ value: p.ProjectID, label: p.ProjectName }))),
+      hint: 'An invoice or an order brings its own project. Otherwise say which project this money is for, or Head office.' },
+    { name: 'ClearsOpeningBalance', label: 'This pays dues from before PMS (post them as an opening balance)', type: 'checkbox', span: 2 },
+    { name: 'OpeningAsOf', label: 'Those dues stood as at (optional)', type: 'date',
+      hint: 'Left blank: the payment date. Only when the box above is ticked.' },
     { name: 'PaymentDate', label: 'Payment date', type: 'date', required: true,
       value: new Date().toISOString().slice(0, 10) },
     { name: 'Amount', label: 'Amount', type: 'number', required: true },
@@ -6021,10 +6118,17 @@ async function openVendorPaymentForm(vendor, onSaved) {
         const data = UI.validate(form, fields);
         if (!data) return;
         data.VendorID = vendor.VendorID;
-        if (data.SupplierInvoiceID) data.POID = '';   // the invoice names its own order
+        if (data.ClearsOpeningBalance && (data.SupplierInvoiceID || data.POID)) {
+          UI.warn('Dues from before PMS are not against an invoice or an order: leave those blank.');
+          return;
+        }
+        if (data.SupplierInvoiceID) { data.POID = ''; data.ProjectID = ''; }   // the invoice names its own
         else if (data.POID) {
           const o = orders.find(x => x.POID === data.POID);
           if (o) data.ProjectID = o.ProjectID;
+        } else if (!data.ProjectID) {
+          UI.warn('Choose the project this payment is for, or Head office.');
+          return;
         }
         m.busy(true);
         try {
