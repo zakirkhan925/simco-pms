@@ -12189,7 +12189,8 @@ function lineGrid(items, units, opts) {
              <option value="">—</option>${unitOptions(row.Unit)}</select></td>
        <td><input class="input" type="number" step="any" min="0" data-f="Quantity"
                   value="${row.Quantity === undefined ? '' : row.Quantity}"></td>
-       <td><input class="input" type="number" step="any" min="0" data-f="Rate"${locked ? ' readonly' : ''}
+       <td><input class="input" type="number" step="any" min="0" data-f="Rate"${o.ratesLocked || (locked && !o.billedRates) ? ' readonly' : ''}
+                  title="${o.ratesLocked ? 'Approved agreement: only an administrator can change a rate' : ''}"
                   value="${row.Rate === undefined ? '' : row.Rate}"></td>
        <td class="num"><span class="line-amount">—</span></td>
        <td><button class="line-drop" type="button" title="${locked
@@ -12225,13 +12226,22 @@ function lineGrid(items, units, opts) {
   return { root, collect, recalc };
 }
 
-function agreementLinesEditor(agreementId, items, units, onSaved) {
+function agreementLinesEditor(agreementId, items, units, onSaved, rates) {
+  const r = rates || {};
   const body = UI.el('div');
   body.innerHTML =
     `<p class="muted" style="margin:0 0 12px;font-size:13px">
-       Each line is measured separately. A line that has already been billed keeps its
-       rate and unit — only its quantity may grow.</p>`;
-  const grid = lineGrid(items, units);
+       Each line is measured separately. A line that has already been billed keeps its unit, and its
+       quantity can only grow.</p>` +
+    (r.locked
+      ? `<div class="banner banner-warn" style="margin:0 0 12px">This agreement is approved: only an administrator can
+           change a rate or price a new line.</div>`
+      : r.approved
+        ? `<div class="banner" style="margin:0 0 12px">Changing the rate of a line already billed: the difference on the
+             quantity billed so far is added to (or taken off) the next bill as a <strong>rate revision</strong>.
+             Bills already approved stay as they are.</div>`
+        : '');
+  const grid = lineGrid(items, units, { ratesLocked: !!r.locked, billedRates: !!r.approved && !r.locked });
   body.appendChild(grid.root);
   body.appendChild(UI.el('div', { id: 'lineError' }));
 
@@ -12426,7 +12436,8 @@ async function pageAgreement(root, agreementId) {
        ${statTile('Contract value', cash(p.contractValue),
            a.IsMeasured ? p.lineCount + ' measured line(s)' : UI.esc(a.Scope || ''))}
        ${statTile('Billed', cash(p.billed), 'gross work approved')}
-       ${statTile('Remaining', cash(p.remaining), 'left of the agreement')}
+       ${statTile('Remaining', cash(p.remaining), d.rateDifference
+         ? 'includes a rate revision of ' + cash(d.rateDifference) + ' for the next bill' : 'left of the agreement')}
        ${statTile('Paid', cash(p.paid), '')}
        ${statTile('Outstanding', cash(p.outstanding), 'net still to pay')}
        ${statTile('Retention held', cash(p.retentionHeld),
@@ -12525,7 +12536,8 @@ async function pageAgreement(root, agreementId) {
   const on = (id, fn) => { const b = document.getElementById(id); if (b) b.onclick = fn; };
   on('agrEdit', () => agreementForm(a, a.SubcontractorID, () => navigate('agreement', agreementId)));
   on('agrLines', () => agreementLinesEditor(agreementId, d.items, d.units,
-    () => navigate('agreement', agreementId)));
+    () => navigate('agreement', agreementId),
+    { locked: d.canChangeRates === false, approved: ['Draft', 'Returned'].indexOf(a.Status) === -1 }));
   on('agrBillBtn', () => subBillForm(agreementId, d, () => navigate('agreement', agreementId)));
   on('agrStatusBtn', () => agreementStatusDialog(agreementId, d.allowedTransitions));
   on('agrSubmit', async () => {
@@ -12703,6 +12715,9 @@ async function subBillForm(agreementId, agreementData, onSaved, existing) {
   });
   const measured = allItems.filter(i => Number(i.BalanceQty) > 0 || Number(i.PreviousQty) > 0);
   const isMeasured = allItems.length > 0;
+  // Owed (or to come back) on work billed before a rate changed: it goes on this bill.
+  const revisions = allItems.filter(i => Number(i.RateDifference || 0) !== 0);
+  const revisionTotal = revisions.reduce((t, i) => t + Number(i.RateDifference), 0);
 
   const fields = [
     { name: 'PeriodFrom', label: 'Period from', type: 'date', required: true },
@@ -12764,7 +12779,17 @@ async function subBillForm(agreementId, agreementData, onSaved, existing) {
              </tr>`).join('')}</tbody>
          </table>
        </div>
-       <div id="sheetWarn"></div>`;
+       <div id="sheetWarn"></div>` +
+      (revisions.length
+        ? `<h4 style="margin:18px 0 6px;font-size:13px">Rate revision on work billed earlier</h4>
+           <div class="table-wrap"><table class="lines"><tbody>${revisions.map(i => `
+             <tr><td>${UI.esc(i.Description)} <span class="muted">· ${lineQty(i.PreviousQty)} ${UI.esc(i.Unit)} billed earlier,
+               now at ${cash(i.Rate)}</span></td>
+               <td class="num" style="width:140px"><strong>${Number(i.RateDifference) < 0 ? '−' : '+'}${cash(Math.abs(i.RateDifference))}</strong></td></tr>`).join('')}
+           </tbody></table></div>
+           <p class="muted" style="font-size:12.5px;margin:6px 0 0">Added to this bill automatically: the rate changed after
+             that work was billed. Approved bills stay as they were.</p>`
+        : '');
     body.appendChild(sheet);
   }
 
@@ -12795,6 +12820,7 @@ async function subBillForm(agreementId, agreementData, onSaved, existing) {
       });
       sheet.querySelector('#sheetWarn').innerHTML = warn.length
         ? '<div class="banner banner-warn mt-8">' + warn.map(UI.esc).join('<br>') + '</div>' : '';
+      gross += revisionTotal;
     } else {
       gross = Number(v.GrossAmount || 0);
     }
@@ -12831,7 +12857,7 @@ async function subBillForm(agreementId, agreementData, onSaved, existing) {
           if (!data) return;
           if (isMeasured) {
             data.items = readSheet();
-            if (!data.items.length) {
+            if (!data.items.length && !(revisionTotal > 0)) {
               UI.warn('Enter the quantity done this period against at least one line.');
               return;
             }
@@ -12893,7 +12919,8 @@ async function pageSubBill(root, billId) {
                  <td>${UI.esc(i.Unit)}</td>
                  <td class="num">${lineQty(i.ContractQty)}</td>
                  <td class="num">${lineQty(i.PreviousQty)}</td>
-                 <td class="num"><strong>${lineQty(i.CurrentQty)}</strong></td>
+                 <td class="num"><strong>${Number(i.CurrentQty) === 0 && Number(i.CurrentAmount) !== 0
+                   ? '<span class="muted">rate revision</span>' : lineQty(i.CurrentQty)}</strong></td>
                  <td class="num">${lineQty(i.CumulativeQty)}</td>
                  <td class="num">${cash(i.Rate)}</td>
                  <td class="num">${cash(i.CurrentAmount)}</td>
@@ -14827,6 +14854,8 @@ function bgmFilterBar(host, meta, onApply) {
     <div class="field"><label for="bgmSearch">Search</label>
       <input class="input" id="bgmSearch" placeholder="Number, bank, beneficiary, contract" value="${UI.esc(f.search || '')}"></div>
     <div class="field"><label for="bgmCat">Type</label><select class="input" id="bgmCat">${opt(cats, f.category, 'All types')}</select></div>
+    <div class="field"><label for="bgmFor">Guarantee for</label><select class="input" id="bgmFor">
+      ${opt(Object.keys(meta.guaranteeTypes || {}).map(k => ({ value: k, label: meta.guaranteeTypes[k] })), f.guaranteeType, 'All')}</select></div>
     <div class="field"><label for="bgmIssuer">Bank / insurance company</label><select class="input" id="bgmIssuer">
       ${opt(meta.issuers.map(x => ({ value: x, label: x })), f.issuer, 'All')}</select></div>
     <div class="field"><label for="bgmBen">Beneficiary</label><select class="input" id="bgmBen">
@@ -14845,7 +14874,7 @@ function bgmFilterBar(host, meta, onApply) {
   const read = () => {
     const v = id => document.getElementById(id).value.trim();
     bgmState.filters = {
-      search: v('bgmSearch'), category: v('bgmCat'), issuer: v('bgmIssuer'), beneficiary: v('bgmBen'),
+      search: v('bgmSearch'), category: v('bgmCat'), guaranteeType: v('bgmFor'), issuer: v('bgmIssuer'), beneficiary: v('bgmBen'),
       projectId: v('bgmProj'), contract: v('bgmContract'), status: v('bgmStatus'),
       issueFrom: v('bgmIssueFrom'), issueTo: v('bgmIssueTo'), expiryFrom: v('bgmExpFrom'), expiryTo: v('bgmExpTo')
     };
@@ -14892,8 +14921,10 @@ async function pageBgmDashboard(root) {
          <span class="muted">Listed under Overdue recoveries below, oldest first.</span></div>` : ''}
       <div class="card"><div class="card-head"><div class="card-title">Instruments</div></div>
         <div class="stat-grid" style="padding:16px">
-          ${['CDR', 'BG', 'PB', 'IG'].map(k => statTileBgm(cat(k).label + (k === 'CDR' ? 's' : 's'), String(cat(k).total),
+          ${['CDR', 'BG', 'IG'].map(k => statTileBgm(cat(k).label + 's', String(cat(k).total),
             cat(k).open + ' still open')).join('')}
+          ${cat('PERFORMANCE') ? statTileBgm('Performance Bonds', String(cat('PERFORMANCE').total),
+            cat('PERFORMANCE').bank + ' bank · ' + cat('PERFORMANCE').insurance + ' insurance · ' + cat('PERFORMANCE').open + ' open') : ''}
         </div></div>
       <div class="card mt-16"><div class="card-head"><div class="card-title">Recovery position</div></div>
         <div class="stat-grid" style="padding:16px">
@@ -14989,7 +15020,8 @@ async function pageBgmRegister(root) {
   let last = null;
   const cols = [
     { key: 'InstrumentID', label: 'Record', render: r => bgmLink(r.InstrumentID) },
-    { key: 'CategoryName', label: 'Type' },
+    { key: 'CategoryName', label: 'Type', render: r => UI.esc(r.CategoryName) +
+        (r.GuaranteeTypeName ? `<br><span class="muted" style="font-size:12px">${UI.esc(r.GuaranteeTypeName)}</span>` : '') },
     { key: 'ReferenceNo', label: 'Number' },
     { key: 'Issuer', label: 'Bank / insurer' },
     { key: 'Beneficiary', label: 'Beneficiary' },
@@ -15023,7 +15055,7 @@ async function pageBgmRegister(root) {
 }
 
 const BGM_EXPORT_COLS = [
-  ['InstrumentID', 'Record'], ['CategoryName', 'Type'], ['ReferenceNo', 'Number'], ['Issuer', 'Bank / insurance company'],
+  ['InstrumentID', 'Record'], ['CategoryName', 'Type'], ['GuaranteeTypeName', 'Guarantee for'], ['ReferenceNo', 'Number'], ['Issuer', 'Bank / insurance company'],
   ['Beneficiary', 'Beneficiary'], ['ProjectName', 'Project'], ['ContractRef', 'Contract'], ['WorkOrderNo', 'Work order'],
   ['Purpose', 'Purpose'], ['Currency', 'Currency'], ['IssueDate', 'Issue / deposit date'], ['ExpiryDate', 'Expiry'],
   ['ExpectedReturnDate', 'Expected return'], ['ReleaseEligibilityDate', 'Release eligibility'],
@@ -15126,6 +15158,7 @@ async function pageBgmInstrument(root, id) {
           <dt>Recovery due since</dt><dd>${bgmDate(i.DueDate)}${i.DaysOutstanding ? ` <strong>${i.DaysOutstanding} days</strong> · ${UI.esc(i.Ageing)}` : ''}</dd>
           <dt>Project</dt><dd>${UI.esc(i.ProjectName || '—')}</dd>
           <dt>Contract / work order</dt><dd>${UI.esc([i.ContractRef, i.WorkOrderNo].filter(Boolean).join(' · ') || '—')}</dd>
+          <dt>Guarantee for</dt><dd>${UI.esc(i.GuaranteeTypeName || '—')}</dd>
           <dt>Purpose</dt><dd>${UI.esc(i.Purpose || '—')}</dd>
           <dt>Responsible</dt><dd>${UI.esc(i.ResponsibleName || '—')}</dd>
           <dt>Document reference</dt><dd>${UI.esc(i.DocumentRef || '—')}</dd>
@@ -15279,11 +15312,15 @@ function bgmInstrumentForm(existing, onSaved) {
   let form, fields;
   const build = cat => {
     const isCdr = cat === 'CDR', ig = cat === 'IG';
-    const amountLabel = { CDR: 'CDR amount', BG: 'Guarantee amount', PB: 'Bond amount', IG: 'Guarantee amount' }[cat];
-    const numberLabel = { CDR: 'CDR number', BG: 'BG number', PB: 'Bond number', IG: 'Guarantee reference number' }[cat];
+    const amountLabel = { CDR: 'CDR amount', BG: 'Guarantee amount', IG: 'Guarantee amount' }[cat];
+    const numberLabel = { CDR: 'CDR number', BG: 'BG number', IG: 'Guarantee / bond reference number' }[cat];
+    const forOptions = Object.keys(meta.guaranteeTypes).map(k => ({ value: k, label: meta.guaranteeTypes[k] }));
     fields = [
       { name: 'Category', label: 'Type', type: 'select', required: true, readonly: !!existing,
         options: Object.keys(meta.categories).map(k => ({ value: k, label: meta.categories[k] })) },
+      { name: 'GuaranteeType', label: isCdr ? 'CDR given as' : 'Guarantee for', type: 'select', required: !isCdr,
+        options: (isCdr ? [{ value: '', label: '— not stated —' }] : [{ value: '', label: '— choose —' }]).concat(forOptions),
+        hint: isCdr ? '' : 'A performance bond is a bank or insurance guarantee given for performance: choose the issuer in Type and Performance bond here.' },
       { name: 'ReferenceNo', label: numberLabel, required: true },
       { name: 'Issuer', label: ig ? 'Insurance company' : 'Issuing bank', required: true },
       { name: 'Beneficiary', label: 'Beneficiary', required: true },
@@ -15291,8 +15328,8 @@ function bgmInstrumentForm(existing, onSaved) {
       isCdr ? { name: 'ExpectedReturnDate', label: 'Expected return date', type: 'date', hint: 'Recovery falls due on this date.' }
         : { name: 'ExpiryDate', label: 'Expiry date', type: 'date', required: true,
             hint: existing ? 'After a renewal, the expiry changes with "Record a step → Renewed".' : '' },
-      cat === 'PB' || ig ? { name: 'ReleaseEligibilityDate', label: ig ? 'Margin refund eligibility date' : 'Release eligibility date', type: 'date',
-        hint: cat === 'PB' ? 'If the bond can be released before expiry, recovery falls due from this date.' : '' } : null,
+      isCdr ? null : { name: 'ReleaseEligibilityDate', label: 'Release eligibility date', type: 'date',
+        hint: 'If it can be released before expiry (a performance bond on completion, say), recovery falls due from this date.' },
       { name: 'Currency', label: 'Currency', required: true, hint: 'PKR, USD…' },
       { name: 'FaceValue', label: amountLabel, type: 'number', required: true },
       isCdr ? null : { name: 'CashMargin', label: ig ? 'Insurance margin deposited' : 'Cash margin', type: 'number' },
