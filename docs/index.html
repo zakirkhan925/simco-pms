@@ -5507,9 +5507,21 @@ async function loadVendorLedger(vendorId) {
   const sym = App.settings.currencySymbol || 'Rs';
   const from = (document.getElementById('ledFrom') || {}).value || '';
   const to = (document.getElementById('ledTo') || {}).value || '';
+  const projectId = (document.getElementById('ledProject') || {}).value || '';
   try {
-    const d = (await api('getVendorLedger', vendorId, { from, to })).data;
+    const d = (await api('getVendorLedger', vendorId, { from, to, projectId })).data;
     const s = d.summary;
+    // The project list is the projects this vendor's account touches, read from the
+    // whole statement (owner's request, 12 Nov 2026). A narrowed one keeps the list it had.
+    const sel = document.getElementById('ledProject');
+    if (sel && !projectId) {
+      const seen = new Map();
+      d.entries.forEach(e => { if (e.projectId && !seen.has(e.projectId)) seen.set(e.projectId, e.project || e.projectId); });
+      sel.innerHTML = '<option value="">All projects</option>' + Array.from(seen.entries())
+        .sort((x, y) => String(x[1]).localeCompare(String(y[1])))
+        .map(([id, name]) => `<option value="${UI.esc(id)}">${UI.esc(name)}</option>`).join('');
+      sel.value = '';
+    }
     // One line of figures, not four cards: the statement below is the thing
     // being read, and tiles the height of the page pushed it out of sight.
     document.getElementById('vendorLedgerSummary').innerHTML =
@@ -5542,8 +5554,9 @@ async function loadVendorLedger(vendorId) {
           `<span class="mono nowrap">${UI.esc(r.ref)}</span>` +
           (r.document ? `<br><span class="muted">${UI.esc(r.document)}</span>` : '') },
         { key: 'description', label: 'Particulars', render: r =>
-          (r.opening ? `<em>${UI.esc(r.description)}</em>` : UI.esc(r.description)) +
-          (r.project ? `<br><span class="muted">${UI.esc(r.project)}</span>` : '') },
+          r.opening ? `<em>${UI.esc(r.description)}</em>` : UI.esc(r.description) },
+        { key: 'project', label: 'Project', render: r =>
+          r.opening ? '' : r.project ? UI.esc(r.project) : '<span class="muted">—</span>' },
         { key: 'debit', label: 'Debit', align: 'right', width: '108px', render: r =>
           r.debit ? UI.fmt.number(r.debit) : '<span class="muted">—</span>' },
         { key: 'credit', label: 'Credit', align: 'right', width: '108px', render: r =>
@@ -5608,8 +5621,9 @@ async function loadVendorLedger(vendorId) {
 async function exportVendorLedger(vendorId) {
   const from = (document.getElementById('ledFrom') || {}).value || '';
   const to = (document.getElementById('ledTo') || {}).value || '';
+  const projectId = (document.getElementById('ledProject') || {}).value || '';
   try {
-    const d = (await api('getVendorLedger', vendorId, { from, to })).data;
+    const d = (await api('getVendorLedger', vendorId, { from, to, projectId })).data;
     const head = ['Date', 'Type', 'Reference', 'Document', 'Project', 'Detail',
                   'Debit', 'Credit', 'Balance'];
     const esc = v => {
@@ -6068,6 +6082,8 @@ async function pageVendorProfile(root, vendorId) {
              <input class="input" type="date" id="ledFrom"></div>
            <div class="field"><label for="ledTo">To</label>
              <input class="input" type="date" id="ledTo"></div>
+           <div class="field"><label for="ledProject">Project</label>
+             <select class="input" id="ledProject"><option value="">All projects</option></select></div>
            <button class="btn btn-sm" id="ledApply">Apply</button>
            <button class="btn btn-sm" id="ledPrint">Print statement</button>
            <button class="btn btn-sm" id="ledCsv">Export</button>
@@ -6136,12 +6152,15 @@ async function pageVendorProfile(root, vendorId) {
     const b = document.getElementById(id);
     if (b) b.onclick = () => loadVendorLedger(vendorId);
   });
+  const lpj = document.getElementById('ledProject');
+  if (lpj) lpj.onchange = () => loadVendorLedger(vendorId);
   const csv = document.getElementById('ledCsv');
   if (csv) csv.onclick = () => exportVendorLedger(vendorId);
   const lp = document.getElementById('ledPrint');
   if (lp) lp.onclick = () => printRecord('VENDORSTMT', vendorId, {
     from: (document.getElementById('ledFrom') || {}).value || '',
-    to: (document.getElementById('ledTo') || {}).value || ''
+    to: (document.getElementById('ledTo') || {}).value || '',
+    projectId: (document.getElementById('ledProject') || {}).value || ''
   });
   if (d.canLedger) loadVendorLedger(vendorId);
 
@@ -16996,25 +17015,26 @@ const PRINT_BODIES = {
         ${v.NTN ? `<dt>NTN</dt><dd>${UI.esc(v.NTN)}</dd>` : ''}
         ${v.PaymentTerms ? `<dt>Terms</dt><dd>${UI.esc(v.PaymentTerms)}</dd>` : ''}
         <dt>Period</dt><dd>${UI.esc(period)}</dd>
+        ${d.projectId ? `<dt>Project</dt><dd>${UI.esc(d.projectName || d.projectId)}</dd>` : ''}
       </dl>
       <table>
         <thead><tr><th style="width:92px">Date</th><th style="width:96px">Reference</th>
-          <th>Particulars</th><th class="r" style="width:100px">Debit</th>
+          <th>Particulars</th><th style="width:120px">Project</th><th class="r" style="width:100px">Debit</th>
           <th class="r" style="width:100px">Credit</th>
           <th class="r" style="width:110px">Balance</th></tr></thead>
         <tbody>
           <tr><td></td><td></td><td><em>Balance brought forward</em></td>
-            <td></td><td></td><td class="r">${n(d.openingBalance)}</td></tr>
+            <td></td><td></td><td></td><td class="r">${n(d.openingBalance)}</td></tr>
           ${(d.entries || []).map(e => `<tr>
             <td>${UI.esc(UI.fmt.date(e.date))}</td>
             <td>${UI.esc(e.ref)}</td>
-            <td>${UI.esc(e.document ? e.document + ' — ' : '')}${UI.esc(e.description)}
-              ${e.project ? '<br><small>' + UI.esc(e.project) + '</small>' : ''}</td>
+            <td>${UI.esc(e.document ? e.document + ' — ' : '')}${UI.esc(e.description)}</td>
+            <td>${UI.esc(e.project || '—')}</td>
             <td class="r">${e.debit ? n(e.debit) : ''}</td>
             <td class="r">${e.credit ? n(e.credit) : ''}</td>
             <td class="r">${n(e.balance)}</td></tr>`).join('')}
         </tbody>
-        <tfoot><tr class="total"><td colspan="3">Balance payable</td>
+        <tfoot><tr class="total"><td colspan="4">Balance payable${d.projectId ? ' — ' + UI.esc(d.projectName || d.projectId) : ''}</td>
           <td class="r">${n(s.invoiced)}</td><td class="r">${n(s.paid)}</td>
           <td class="r">${n(s.closingBalance)}</td></tr></tfoot>
       </table>
