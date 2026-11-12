@@ -6086,10 +6086,6 @@ async function openSetPaymentProject(entry, onSaved) {
        <tbody id="spRows"></tbody></table>
      <button class="btn btn-sm mt-8" id="spAdd" type="button">+ Split to another project</button>
      <div class="muted" style="margin-top:8px;font-size:12.5px" id="spSum"></div>
-     <label class="checkbox mt-16" style="display:block"><input type="checkbox" id="spOpening">
-       This payment cleared dues from before PMS: post them as an opening balance on the same project(s)</label>
-     <div class="muted" style="font-size:12px;margin:2px 0 0 22px">Leave it unticked for an advance, or when the vendor’s
-       bills for these goods will be entered against their orders.</div>
      <div class="field mt-16"><label for="spReason">Reason *</label>
        <textarea class="input" id="spReason" placeholder="For example: per Ali Hassan, old dues on Askari 14 JV"></textarea></div>`;
   const tbody = body.querySelector('#spRows');
@@ -6123,7 +6119,7 @@ async function openSetPaymentProject(entry, onSaved) {
         m.busy(true);
         try {
           const res = await api('setVendorPaymentProject', entry.ref,
-            { parts, Reason: reason, ClearsOpeningBalance: body.querySelector('#spOpening').checked });
+            { parts, Reason: reason });
           m.close(); UI.success('Saved', res.message);
           if (onSaved) onSaved();
         } catch (e) { UI.error('Not saved', e.message); }
