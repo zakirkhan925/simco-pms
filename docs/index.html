@@ -5038,6 +5038,7 @@ async function renderBudgetWorks(projectId) {
         { key: 'SubcontractedQty', label: 'Subcontracted', align: 'right', render: r => q(r.SubcontractedQty) +
             (r.OverSubcontractedQty ? `<br><span class="state-error">${q(r.OverSubcontractedQty)} over scope</span>` : '') +
             (r.ConvertedLines ? `<br><span class="muted" title="Agreement line(s) in another unit of the same measure, converted">${r.ConvertedLines} converted</span>` : '') +
+            (r.CoveringLines ? `<br><span class="muted" title="Counted from agreement line(s) covering several BOQ items, by proportion">${r.CoveringLines} by area line</span>` : '') +
             (r.OtherUnitLines ? `<br><span class="state-error" title="An agreement line in a unit that cannot become ${UI.esc(r.Unit)}; not added">${r.OtherUnitLines} line(s) in another unit</span>` : '') +
             (r.Agreements && r.Agreements.length ? `<br>${r.Agreements.map(a =>
               `<a href="#" class="muted" data-agr="${UI.esc(a)}">${UI.esc(a)}</a>`).join(' ')}` : '') },
@@ -12621,6 +12622,7 @@ function lineGrid(items, units, opts) {
   const rows = (items || []).map(i => ({
     AgreementItemID: i.AgreementItemID, ItemCode: i.ItemCode || '', Description: i.Description || '',
     Unit: i.Unit || '', Quantity: i.Quantity, Rate: i.Rate, Remarks: i.Remarks || '',
+    BOQItems: i.BOQItems || '', BOQShare: i.BOQShare === null || i.BOQShare === undefined ? '' : i.BOQShare,
     locked: Number(i.PreviousQty || 0) > 0, billed: Number(i.PreviousQty || 0)
   }));
 
@@ -12647,7 +12649,8 @@ function lineGrid(items, units, opts) {
      <button class="btn mt-8" type="button" id="lineAdd">+ Add line</button>
      <datalist class="boq-codes"></datalist>
      <p class="muted boq-note" style="display:none;margin:8px 0 0;font-size:12.5px">Pick a BOQ item as the code and
-       its quantity is tracked against the BOQ under Budget &rarr; Works (Sft against Sqm and the like is converted).</p>`;
+       its quantity is tracked against the BOQ under Budget &rarr; Trade works (Sft against Sqm and the like is converted).
+       A line agreed by area for several items (tiling, plaster, wiring...): use <strong>Covers BOQ items</strong>.</p>`;
 
   const tbody = root.querySelector('#lineRows');
   // The project's BOQ items, offered as codes (13 Nov 2026): a line coded with a
@@ -12655,8 +12658,11 @@ function lineGrid(items, units, opts) {
   const listId = 'boqCodes' + Math.random().toString(36).slice(2, 8);
   const dl = root.querySelector('.boq-codes');
   dl.id = listId;
-  let boqByCode = new Map();
-  const setBoq = list => {
+  let boqByCode = new Map(), boqList = [], boqLinks = false;
+  const setBoq = (list, links) => {
+    boqList = list || [];
+    boqLinks = !!links && boqList.length > 0;
+    tbody.querySelectorAll('.cover-btn').forEach(b => { b.style.display = boqLinks ? '' : 'none'; });
     boqByCode = new Map((list || []).map(b => [String(b.ItemCode).trim().toLowerCase(), b]));
     dl.innerHTML = (list || []).map(b => `<option value="${UI.esc(b.ItemCode)}">${UI.esc(
       (b.Category ? b.Category + ' · ' : '') + b.Description + ' (' + lineQty(b.EffectiveQuantity ?? b.Quantity) + ' ' + b.Unit + ')')}</option>`).join('');
@@ -12696,7 +12702,10 @@ function lineGrid(items, units, opts) {
     tr.dataset.id = row.AgreementItemID || '';
     tr.innerHTML =
       `<td><input class="input" data-f="ItemCode" value="${UI.esc(row.ItemCode)}" placeholder="BW-01" list="${listId}"
-                  autocomplete="off"></td>
+                  autocomplete="off">
+            <button type="button" class="btn btn-ghost btn-sm cover-btn" style="display:${boqLinks ? '' : 'none'};padding:2px 4px;
+              font-size:11.5px;white-space:normal;text-align:left;height:auto">Covers BOQ items</button>
+            <div class="muted cover-sum" style="font-size:11.5px"></div></td>
        <td><input class="input" data-f="Description" value="${UI.esc(row.Description)}"
                   placeholder="Block work 8&quot;"></td>
        <td><select class="input" data-f="Unit"${locked ? ' disabled' : ''}>
@@ -12713,9 +12722,83 @@ function lineGrid(items, units, opts) {
     tbody.appendChild(tr);
     tr.querySelectorAll('input,select').forEach(i => { i.oninput = recalc; i.onchange = recalc; });
     tr.querySelector('[data-f=ItemCode]').onchange = () => { fromBoq(tr); recalc(); };
+    tr.dataset.covers = row.BOQItems || '';
+    tr.dataset.share = row.BOQShare === undefined || row.BOQShare === null ? '' : String(row.BOQShare);
+    showCover(tr);
+    tr.querySelector('.cover-btn').onclick = () => coverPicker(tr);
     const drop = tr.querySelector('.line-drop');
     if (!locked) drop.onclick = () => { tr.remove(); recalc(); };
   };
+
+  /** The summary under a line's code: what it covers, and its share. */
+  function showCover(tr) {
+    const list = (tr.dataset.covers || '').split(',').map(x => x.trim()).filter(Boolean);
+    const btn = tr.querySelector('.cover-btn');
+    tr.querySelector('.cover-sum').textContent = list.length
+      ? 'Covers ' + (list.length > 3 ? list.length + ' BOQ items' : list.join(', ')) +
+        (tr.dataset.share && Number(tr.dataset.share) !== 100 ? ' · ' + tr.dataset.share + '%' : '') : '';
+    if (btn) btn.textContent = list.length ? 'Change covered items' : 'Covers BOQ items';
+  }
+
+  /** Choose the BOQ items one line covers, e.g. a tiling or wiring line agreed by area. */
+  function coverPicker(tr) {
+    const chosen = new Set((tr.dataset.covers || '').split(',').map(x => x.trim().toLowerCase()).filter(Boolean));
+    const trades = [...new Set(boqList.map(b => b.Category || ''))].filter(Boolean).sort();
+    const body = UI.el('div');
+    body.innerHTML = `
+      <p class="muted" style="margin:0 0 10px;font-size:13px">The BOQ items this line's work covers. On Budget &rarr; Trade works
+        each one counts its scope x the share below as given to this subcontractor, and is measured in proportion to the
+        quantity billed on this line (bill a quarter of the line, a quarter of each item). Units need not match.</p>
+      <div class="filters" style="margin-bottom:8px">
+        <div class="field"><label>Trade</label><select class="input cp-trade"><option value="">All trades</option>
+          ${trades.map(t => `<option value="${UI.esc(t)}">${UI.esc(t)}</option>`).join('')}</select></div>
+        <div class="field"><label>Search</label><input class="input cp-search" placeholder="Code or description"></div>
+        <div class="field"><label>Share of their scope (%)</label><input class="input cp-share" type="number" min="1" max="100"
+          step="any" value="${UI.esc(tr.dataset.share || '100')}" style="max-width:110px"></div>
+      </div>
+      <div class="flex gap-8" style="margin-bottom:6px"><button type="button" class="btn btn-sm cp-all">Tick all shown</button>
+        <button type="button" class="btn btn-sm cp-none">Untick all shown</button><span class="muted cp-count" style="align-self:center"></span></div>
+      <div class="cp-list" style="max-height:46vh;overflow:auto;border:1px solid var(--border);border-radius:6px"></div>`;
+    const list = body.querySelector('.cp-list');
+    const shown = () => {
+      const t = body.querySelector('.cp-trade').value, q = body.querySelector('.cp-search').value.trim().toLowerCase();
+      return boqList.filter(b => (!t || b.Category === t) &&
+        (!q || (b.ItemCode + ' ' + b.Description).toLowerCase().indexOf(q) !== -1));
+    };
+    const draw = () => {
+      list.innerHTML = shown().map(b => `<label style="display:flex;gap:8px;padding:7px 10px;border-bottom:1px solid var(--border);
+          align-items:flex-start;font-size:13px"><input type="checkbox" data-code="${UI.esc(b.ItemCode)}"
+          ${chosen.has(String(b.ItemCode).toLowerCase()) ? 'checked' : ''} style="margin-top:3px">
+          <span><strong class="mono">${UI.esc(b.ItemCode)}</strong> ${UI.esc(String(b.Description || '').slice(0, 110))}
+          <span class="muted"> · ${lineQty(b.EffectiveQuantity ?? b.Quantity)} ${UI.esc(b.Unit)}</span></span></label>`).join('') ||
+        '<div class="muted" style="padding:10px">Nothing matches.</div>';
+      list.querySelectorAll('input[type=checkbox]').forEach(c => c.onchange = () => {
+        const k = c.dataset.code.toLowerCase(); if (c.checked) chosen.add(k); else chosen.delete(k); count();
+      });
+      count();
+    };
+    const count = () => { body.querySelector('.cp-count').textContent = chosen.size + ' chosen'; };
+    body.querySelector('.cp-trade').onchange = draw;
+    body.querySelector('.cp-search').oninput = draw;
+    body.querySelector('.cp-all').onclick = () => { shown().forEach(b => chosen.add(String(b.ItemCode).toLowerCase())); draw(); };
+    body.querySelector('.cp-none').onclick = () => { shown().forEach(b => chosen.delete(String(b.ItemCode).toLowerCase())); draw(); };
+    draw();
+    UI.modal({
+      title: 'BOQ items this line covers', size: 'wide', body,
+      footer: [
+        { label: 'Cancel', onClick: m => m.close() },
+        { label: 'Use these', class: 'btn-primary', onClick: m => {
+          const share = body.querySelector('.cp-share').value.trim();
+          const n = Number(share);
+          if (share && (!(n > 0) || n > 100)) { UI.warn('Share', 'Give a share more than 0 and at most 100.'); return; }
+          tr.dataset.covers = boqList.filter(b => chosen.has(String(b.ItemCode).toLowerCase())).map(b => b.ItemCode).join(', ');
+          tr.dataset.share = tr.dataset.covers && share && n !== 100 ? share : '';
+          showCover(tr);
+          m.close();
+        } }
+      ]
+    });
+  }
 
   const blank = { ItemCode: '', Description: '', Unit: '', Quantity: '', Rate: '' };
   rows.forEach(addRow);
@@ -12733,19 +12816,23 @@ function lineGrid(items, units, opts) {
       Rate: get('Rate').value
     };
     if (tr.dataset.id) out.AgreementItemID = tr.dataset.id;
+    if (boqLinks || tr.dataset.covers) { out.BOQItems = tr.dataset.covers || ''; out.BOQShare = tr.dataset.share || ''; }
     // A row nobody touched is not a line.
     const empty = !out.ItemCode && !out.Description && !out.Unit && !out.Quantity && !out.Rate;
     return empty && !tr.dataset.id ? null : out;
   }).filter(Boolean);
 
   if (o.boq) setBoq(o.boq);
-  return { root, collect, recalc, setBoq };
+  return { root, collect, recalc, setBoq: r => setBoq(r && r.rows ? r.rows : r, r && r.links) };
 }
 
-/** A project's BOQ items, for coding agreement lines; none if it has no BOQ or cannot be read. */
+/** A project's BOQ items, for coding agreement lines, and whether the server takes covering lines. */
 async function boqItemsFor(projectId) {
-  if (!projectId) return [];
-  try { return ((await api('listBOQ', projectId, { pageSize: 1000 })).data.rows || []); } catch (e) { return []; }
+  if (!projectId) return { rows: [], links: false };
+  try {
+    const d = (await api('listBOQ', projectId, { pageSize: 1000 })).data;
+    return { rows: d.rows || [], links: !!d.boqLinks };
+  } catch (e) { return { rows: [], links: false }; }
 }
 
 function agreementLinesEditor(agreementId, items, units, onSaved, rates) {
@@ -13371,7 +13458,9 @@ async function subBillForm(agreementId, agreementData, onSaved, existing) {
            <tbody>${measured.map(i => `
              <tr data-id="${UI.esc(i.AgreementItemID)}">
                <td>${UI.esc(i.Description)}${i.ItemCode
-                 ? ' <span class="muted">· ' + UI.esc(i.ItemCode) + '</span>' : ''}</td>
+                 ? ' <span class="muted">· ' + UI.esc(i.ItemCode) + '</span>' : ''}${i.BOQItems
+                 ? '<br><span class="muted" style="font-size:12px">Covers ' + UI.esc(i.BOQItems) +
+                   (i.BOQShare ? ' · ' + UI.esc(i.BOQShare) + '%' : '') + '</span>' : ''}</td>
                <td>${UI.esc(i.Unit)}</td>
                <td class="num">${lineQty(i.Quantity)}</td>
                <td class="num">${lineQty(i.PreviousQty)}</td>
