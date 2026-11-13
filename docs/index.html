@@ -900,6 +900,8 @@ table.data.ledger tfoot td,table.data.ledger tfoot th{border-top:3px double var(
   table.cardify td.wide,table.cardify td:has(> input[data-f=ItemName]),table.cardify td:has(> input[data-f=Description]),
   table.cardify td:has(> select[data-f=ItemID]){grid-column:1 / -1}
   table.cardify td:empty{display:none}
+  [data-cardify] #worksTable table.cardify td:nth-child(2){grid-column:1 / -1}
+  [data-cardify] table.cardify tr{padding:12px 16px}
   table.cardify .input{border-color:var(--border);background:var(--surface);width:100%}
   table.cardify td.num{text-align:left;padding-right:0}
   table.cardify input.input[type=number]{text-align:left}
@@ -1837,7 +1839,9 @@ document.addEventListener('DOMContentLoaded', boot);
 function labelLines(root) {
   // Line tables, and any table whose rows are typed into (order lines, Tag codes…).
   (root || document).querySelectorAll('table.lines, table.data').forEach(t => {
-    if (!t.classList.contains('lines') && !t.querySelector('tbody input:not([type=checkbox]):not([type=hidden]), tbody select')) return;
+    // ...and any table inside [data-cardify], read better as cards on a phone (Works, 13 Nov 2026).
+    if (!t.classList.contains('lines') && !t.closest('[data-cardify]') &&
+        !t.querySelector('tbody input:not([type=checkbox]):not([type=hidden]), tbody select')) return;
     t.classList.add('cardify');
     const heads = [...t.querySelectorAll('thead th')].map(th => th.textContent.trim());
     if (!heads.length) return;
@@ -4671,7 +4675,9 @@ const budgetState = { page: 1, pageSize: 50, search: '', category: '', show: '' 
 async function renderProjectBudget(host, d, sym) {
   const projectId = d.project.ProjectID;
   host.innerHTML = `
-    <div class="card">
+    <div id="budgetSection" class="flex gap-8" style="display:none;margin-bottom:12px;flex-wrap:wrap"></div>
+    <div id="budgetWorks" data-cardify style="display:none"></div>
+    <div class="card" id="budgetMaterials">
       <div class="card-head">
         <div class="filters">
           <div class="field"><label for="budgetSearch">Search</label>
@@ -4711,6 +4717,8 @@ async function loadBudget(projectId, sym) {
   try {
     const res = await api('listBudget', projectId, budgetQuery());
     const d = res.data;
+    // Materials or trade works (13 Nov 2026): offered when the server says the project has a BOQ.
+    if (d.worksTracking && budgetSectionBar(projectId, sym)) return;
 
     const cat = document.getElementById('budgetCategory');
     if (cat && !cat.dataset.filled) {
@@ -4916,6 +4924,153 @@ function openBudgetForm(projectId, existing, sym, withQty) {
 /* ---------------------------------------- BUDGET QUANTITIES (9 Nov 2026) */
 
 /** How the budget tab tracks: 'both', 'cost' or 'qty' — remembered in this browser. */
+/* ------------------------------------------------ Trade works by quantity (13 Nov 2026) */
+
+const worksState = { search: '', trade: '', show: '' };
+function budgetSection() {
+  let v = 'materials';
+  try { v = localStorage.getItem('pms_budget_section') || 'materials'; } catch (e) {}
+  return v === 'works' ? 'works' : 'materials';
+}
+
+/** The Materials / Trade works switch. Returns true when Works is showing (the caller stops). */
+function budgetSectionBar(projectId, sym) {
+  const bar = document.getElementById('budgetSection');
+  if (!bar) return false;
+  const cur = budgetSection();
+  bar.style.display = '';
+  bar.innerHTML = [['materials', 'Materials'], ['works', 'Trade works']].map(o =>
+    `<button class="btn btn-sm${o[0] === cur ? ' btn-primary' : ''}" data-section="${o[0]}">${o[1]}</button>`).join('') +
+    `<span class="muted" style="align-self:center;font-size:12.5px">${cur === 'works'
+      ? 'Work quantities against the BOQ: given to subcontractors, measured on their bills, executed.'
+      : 'Materials: required, purchased, received, issued.'}</span>`;
+  bar.querySelectorAll('[data-section]').forEach(b => b.onclick = () => {
+    try { localStorage.setItem('pms_budget_section', b.dataset.section); } catch (e) {}
+    renderProjectBudget(bar.parentElement, { project: { ProjectID: projectId } }, sym);
+  });
+  const works = cur === 'works';
+  document.getElementById('budgetMaterials').style.display = works ? 'none' : '';
+  document.getElementById('budgetWorks').style.display = works ? '' : 'none';
+  if (works) renderBudgetWorks(projectId);
+  return works;
+}
+
+async function renderBudgetWorks(projectId) {
+  const host = document.getElementById('budgetWorks');
+  if (!host) return;
+  if (!host.dataset.built) {
+    host.dataset.built = '1';
+    host.innerHTML = `
+      <div class="card">
+        <div class="card-head">
+          <div class="filters">
+            <div class="field"><label for="worksSearch">Search</label>
+              <input class="input" id="worksSearch" placeholder="BOQ code or description" value="${UI.esc(worksState.search)}"></div>
+            <div class="field"><label for="worksTrade">Trade</label><select class="input" id="worksTrade"></select></div>
+            <div class="field"><label for="worksShow">Show</label><select class="input" id="worksShow">
+              ${[['', 'All items'], ['tosub', 'Still to subcontract'], ['full', 'Fully subcontracted'],
+                 ['over', 'Given over scope'], ['none', 'Nothing given yet'], ['unit', 'Unit not convertible']]
+                .map(o => `<option value="${o[0]}"${worksState.show === o[0] ? ' selected' : ''}>${o[1]}</option>`).join('')}
+            </select></div>
+          </div>
+        </div>
+        <div id="worksTotals"></div>
+        <div id="worksTable">${UI.loadingState()}</div>
+        <div id="worksExtras"></div>
+      </div>`;
+    let t;
+    document.getElementById('worksSearch').oninput = e => {
+      clearTimeout(t); t = setTimeout(() => { worksState.search = e.target.value; renderBudgetWorks(projectId); }, 250);
+    };
+    document.getElementById('worksShow').onchange = e => { worksState.show = e.target.value; renderBudgetWorks(projectId); };
+  }
+  const mount = document.getElementById('worksTable');
+  const q = v => UI.fmt.number(v, 2);
+  const agrLinks = root => root.querySelectorAll('[data-agr]').forEach(a =>
+    a.onclick = e => { e.preventDefault(); navigate('agreement', a.dataset.agr); });
+  try {
+    const d = (await api('listBudgetWorks', projectId, Object.assign({ pageSize: 1000 }, worksState))).data;
+    const tr = document.getElementById('worksTrade');
+    if (!tr.dataset.filled) {
+      tr.dataset.filled = '1';
+      tr.innerHTML = '<option value="">All trades</option>' +
+        (d.trades || []).map(x => `<option value="${UI.esc(x)}">${UI.esc(x)}</option>`).join('');
+      tr.value = worksState.trade;
+      tr.onchange = e => { worksState.trade = e.target.value; renderBudgetWorks(projectId); };
+    }
+    const c = d.counts || {};
+    document.getElementById('worksTotals').innerHTML = `
+      <div class="stat-grid" style="padding:16px 16px 0">
+        ${[['BOQ items', String(c.items || 0), 'in this view'],
+           ['Still to subcontract', String(c.tosub || 0), 'item(s) with quantity left'],
+           ['Fully subcontracted', String(c.full || 0), 'item(s)'],
+           ['Given over scope', String(c.over || 0), 'item(s)'],
+           ['Nothing given yet', String(c.none || 0), 'item(s)']]
+          .map(x => `<div class="stat"><div class="stat-label">${UI.esc(x[0])}</div>
+            <div class="stat-value">${UI.esc(x[1])}</div><div class="stat-note">${UI.esc(x[2])}</div>
+            <div class="stat-accent" ${x[0] === 'Given over scope' && x[1] !== '0' ? 'style="background:var(--red-600)"' : ''}></div></div>`).join('')}
+      </div>
+      <div class="card-body">
+        <div class="card-title" style="margin-bottom:8px">By trade</div>
+        <div class="table-wrap"><table class="data">
+          <thead><tr><th>Trade</th><th>Unit</th><th class="num">Items</th><th class="num">Scope</th>
+            <th class="num">Subcontracted</th><th class="num">Measured</th><th class="num">Executed</th>
+            <th class="num">To subcontract</th></tr></thead>
+          <tbody>${(d.tradeTotals || []).map(t => `<tr><td>${UI.esc(t.Trade)}</td><td>${UI.esc(t.Unit)}</td>
+            <td class="num">${t.Items}</td><td class="num">${q(t.ScopeQty)}</td><td class="num">${q(t.SubcontractedQty)}${
+              t.OverSubcontractedQty ? `<br><span class="state-error">${q(t.OverSubcontractedQty)} over</span>` : ''}</td>
+            <td class="num">${q(t.MeasuredQty)}</td><td class="num">${q(t.ExecutedQty)}</td>
+            <td class="num"><strong>${q(t.ToSubcontractQty)}</strong></td></tr>`).join('') ||
+            '<tr><td colspan="8" class="muted">Nothing matches.</td></tr>'}</tbody>
+        </table></div>
+        <p class="muted" style="font-size:12.5px;margin:8px 0 0">One line per unit: quantities in different units are never
+          added. Agreement lines in Sft, Rft, Cft or Ton are converted to the BOQ item's Sqm, Metre, Cum or Kg.</p>
+      </div>`;
+
+    UI.table(mount, {
+      columns: [
+        { key: 'ItemCode', label: 'BOQ item', render: r => `<span class="mono"><strong>${UI.esc(r.ItemCode)}</strong></span><br>
+            <span class="muted">${UI.esc(r.Trade)}</span>` },
+        { key: 'Description', label: 'Description', render: r => `<div style="max-width:420px">${UI.esc(r.Description)}</div>` },
+        { key: 'Unit', label: 'Unit' },
+        { key: 'ScopeQty', label: 'Scope', align: 'right', render: r => q(r.ScopeQty) +
+            (r.Revised ? '<br><span class="muted">revised</span>' : '') },
+        { key: 'SubcontractedQty', label: 'Subcontracted', align: 'right', render: r => q(r.SubcontractedQty) +
+            (r.OverSubcontractedQty ? `<br><span class="state-error">${q(r.OverSubcontractedQty)} over scope</span>` : '') +
+            (r.ConvertedLines ? `<br><span class="muted" title="Agreement line(s) in another unit of the same measure, converted">${r.ConvertedLines} converted</span>` : '') +
+            (r.OtherUnitLines ? `<br><span class="state-error" title="An agreement line in a unit that cannot become ${UI.esc(r.Unit)}; not added">${r.OtherUnitLines} line(s) in another unit</span>` : '') +
+            (r.Agreements && r.Agreements.length ? `<br>${r.Agreements.map(a =>
+              `<a href="#" class="muted" data-agr="${UI.esc(a)}">${UI.esc(a)}</a>`).join(' ')}` : '') },
+        { key: 'MeasuredQty', label: 'Measured', align: 'right', render: r => q(r.MeasuredQty) },
+        { key: 'ExecutedQty', label: 'Executed', align: 'right', render: r => q(r.ExecutedQty) },
+        { key: 'ToSubcontractQty', label: 'To subcontract', align: 'right', render: r => `<strong>${q(r.ToSubcontractQty)}</strong>` }
+      ],
+      rows: d.rows,
+      empty: UI.emptyState('Nothing matches', 'Clear the search or a filter to see more items.')
+    });
+    agrLinks(mount);
+
+    const extras = document.getElementById('worksExtras');
+    extras.innerHTML = (d.notInBoq || []).length
+      ? `<div class="card-body" style="border-top:1px solid var(--border)">
+           <div class="card-title" style="margin-bottom:8px">Subcontracted work coded to no BOQ item</div>
+           <p class="muted" style="font-size:12.5px;margin:0 0 8px">Give these agreement lines a BOQ item code (Scope and
+             rates on the agreement) to count them above.</p>
+           <div class="table-wrap"><table class="data">
+             <thead><tr><th>Code</th><th>Description</th><th>Agreement</th><th class="num">Quantity</th><th class="num">Measured</th></tr></thead>
+             <tbody>${d.notInBoq.map(u => `<tr><td class="mono">${UI.esc(u.ItemCode)}</td><td>${UI.esc(u.Description)}</td>
+               <td><a href="#" data-agr="${UI.esc(u.AgreementID)}">${UI.esc(u.AgreementID)}</a> <span class="muted">${UI.esc(u.Subcontractor)}</span></td>
+               <td class="num">${q(u.Quantity)} ${UI.esc(u.Unit)}</td><td class="num">${q(u.MeasuredQty)}</td></tr>`).join('')}</tbody>
+           </table></div></div>`
+      : '';
+    agrLinks(extras);
+  } catch (e) {
+    mount.innerHTML = UI.errorState(e.message, 'retryWorks');
+    const b = document.getElementById('retryWorks');
+    if (b) b.onclick = () => renderBudgetWorks(projectId);
+  }
+}
+
 function budgetView() {
   let v = 'both';
   try { v = localStorage.getItem('pms_budget_view') || 'both'; } catch (e) {}
@@ -12489,9 +12644,34 @@ function lineGrid(items, units, opts) {
          </tr></tfoot>
        </table>
      </div>
-     <button class="btn mt-8" type="button" id="lineAdd">+ Add line</button>`;
+     <button class="btn mt-8" type="button" id="lineAdd">+ Add line</button>
+     <datalist class="boq-codes"></datalist>
+     <p class="muted boq-note" style="display:none;margin:8px 0 0;font-size:12.5px">Pick a BOQ item as the code and
+       its quantity is tracked against the BOQ under Budget &rarr; Works (Sft against Sqm and the like is converted).</p>`;
 
   const tbody = root.querySelector('#lineRows');
+  // The project's BOQ items, offered as codes (13 Nov 2026): a line coded with a
+  // BOQ item counts toward it in the budget's Works view.
+  const listId = 'boqCodes' + Math.random().toString(36).slice(2, 8);
+  const dl = root.querySelector('.boq-codes');
+  dl.id = listId;
+  let boqByCode = new Map();
+  const setBoq = list => {
+    boqByCode = new Map((list || []).map(b => [String(b.ItemCode).trim().toLowerCase(), b]));
+    dl.innerHTML = (list || []).map(b => `<option value="${UI.esc(b.ItemCode)}">${UI.esc(
+      (b.Category ? b.Category + ' · ' : '') + b.Description + ' (' + lineQty(b.EffectiveQuantity ?? b.Quantity) + ' ' + b.Unit + ')')}</option>`).join('');
+    root.querySelector('.boq-note').style.display = boqByCode.size ? '' : 'none';
+  };
+  const fromBoq = tr => {
+    const code = tr.querySelector('[data-f=ItemCode]');
+    const b = boqByCode.get(code.value.trim().toLowerCase());
+    code.title = b ? 'BOQ ' + b.ItemCode + ': ' + lineQty(b.EffectiveQuantity ?? b.Quantity) + ' ' + b.Unit : '';
+    if (!b) return;
+    const desc = tr.querySelector('[data-f=Description]');
+    if (!desc.value.trim()) desc.value = String(b.Description || '').slice(0, 200);
+    const unit = tr.querySelector('[data-f=Unit]');
+    if (!unit.value && !unit.disabled && Array.from(unit.options).some(o => o.value === b.Unit)) unit.value = b.Unit;
+  };
   const totalCell = root.querySelector('#lineTotal');
   const unitOptions = u => units.map(x =>
     `<option value="${UI.esc(x)}"${x === u ? ' selected' : ''}>${UI.esc(x)}</option>`).join('');
@@ -12515,7 +12695,8 @@ function lineGrid(items, units, opts) {
     const locked = !!row.locked;
     tr.dataset.id = row.AgreementItemID || '';
     tr.innerHTML =
-      `<td><input class="input" data-f="ItemCode" value="${UI.esc(row.ItemCode)}" placeholder="BW-01"></td>
+      `<td><input class="input" data-f="ItemCode" value="${UI.esc(row.ItemCode)}" placeholder="BW-01" list="${listId}"
+                  autocomplete="off"></td>
        <td><input class="input" data-f="Description" value="${UI.esc(row.Description)}"
                   placeholder="Block work 8&quot;"></td>
        <td><select class="input" data-f="Unit"${locked ? ' disabled' : ''}>
@@ -12531,6 +12712,7 @@ function lineGrid(items, units, opts) {
              : 'Remove this line'}"${locked ? ' disabled' : ''}>×</button></td>`;
     tbody.appendChild(tr);
     tr.querySelectorAll('input,select').forEach(i => { i.oninput = recalc; i.onchange = recalc; });
+    tr.querySelector('[data-f=ItemCode]').onchange = () => { fromBoq(tr); recalc(); };
     const drop = tr.querySelector('.line-drop');
     if (!locked) drop.onclick = () => { tr.remove(); recalc(); };
   };
@@ -12556,7 +12738,14 @@ function lineGrid(items, units, opts) {
     return empty && !tr.dataset.id ? null : out;
   }).filter(Boolean);
 
-  return { root, collect, recalc };
+  if (o.boq) setBoq(o.boq);
+  return { root, collect, recalc, setBoq };
+}
+
+/** A project's BOQ items, for coding agreement lines; none if it has no BOQ or cannot be read. */
+async function boqItemsFor(projectId) {
+  if (!projectId) return [];
+  try { return ((await api('listBOQ', projectId, { pageSize: 1000 })).data.rows || []); } catch (e) { return []; }
 }
 
 function agreementLinesEditor(agreementId, items, units, onSaved, rates) {
@@ -12576,6 +12765,7 @@ function agreementLinesEditor(agreementId, items, units, onSaved, rates) {
         : '');
   const grid = lineGrid(items, units, { ratesLocked: !!r.locked, billedRates: !!r.approved && !r.locked });
   body.appendChild(grid.root);
+  if (r.projectId) boqItemsFor(r.projectId).then(grid.setBoq);
   body.appendChild(UI.el('div', { id: 'lineError' }));
 
   UI.modal({
@@ -12706,6 +12896,11 @@ async function agreementForm(existing, subId, onSaved, fixedProjectId) {
     };
     basisField.onchange = applyBasis;
     applyBasis();
+    // The chosen project's BOQ items are offered as line codes.
+    const projField = form.querySelector('[name="ProjectID"]');
+    const loadBoq = () => boqItemsFor(projField && projField.value).then(grid.setBoq);
+    if (projField) projField.addEventListener('change', loadBoq);
+    loadBoq();
   }
 
   UI.modal({
@@ -12909,7 +13104,7 @@ async function pageAgreement(root, agreementId) {
   on('agrEdit', () => agreementForm(a, a.SubcontractorID, () => navigate('agreement', agreementId)));
   on('agrLines', () => agreementLinesEditor(agreementId, d.items, d.units,
     () => navigate('agreement', agreementId),
-    { locked: d.canChangeRates === false, approved: ['Draft', 'Returned'].indexOf(a.Status) === -1 }));
+    { locked: d.canChangeRates === false, approved: ['Draft', 'Returned'].indexOf(a.Status) === -1, projectId: a.ProjectID }));
   on('agrBillBtn', () => subBillForm(agreementId, d, () => navigate('agreement', agreementId)));
   on('agrRecovery', () => subRecoveryForm(agreementId, d, () => navigate('agreement', agreementId)));
   on('agrStatusBtn', () => agreementStatusDialog(agreementId, d.allowedTransitions));
