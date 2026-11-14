@@ -3197,10 +3197,17 @@ async function pageSettings(root) {
         <div class="card-head"><div class="card-title">${UI.esc(cat)}</div></div>
         <div class="card-body"><div class="form-grid">
           ${groups[cat].map(s => `
-            <div class="field">
-              <label for="s_${UI.esc(s.key)}">${UI.esc(s.description || s.key)}</label>
+            <div class="field"${s.key === 'finance.bankAccounts' ? ' style="grid-column:1 / -1"' : ''}>
+              <label for="s_${UI.esc(s.key)}">${UI.esc(s.key === 'finance.bankAccounts' ? 'Company bank accounts' : (s.description || s.key))}</label>
               ${s.key === 'company.logoUrl'
                 ? `<div id="logoControl"></div>`
+                : s.key === 'finance.bankAccounts'
+                // Several accounts, one per line (14 Nov 2026), with how each one reads beneath.
+                ? `<textarea class="input mono" id="s_finance.bankAccounts" data-key="finance.bankAccounts" rows="6"
+                     style="min-height:130px;font-size:13px" placeholder="UBL Bank - 5362 | United Bank Limited | PK76 UNIL 0109 0003 3042 5362&#10;MCB Bank - 0002 | MCB Bank Limited | 0002">${UI.esc(String(s.value || '').split(';').map(x => x.trim()).filter(Boolean).join('\n'))}</textarea>
+                   <div class="hint">One account per line: <strong>QuickBooks GL name | Bank name | Account no / IBAN</strong>.
+                     The GL name is what payments pick and what prints on the voucher's credit line.</div>
+                   <div id="bankPreview" class="mt-8"></div>`
                 : s.type === 'boolean'
                 ? `<select class="input" id="s_${UI.esc(s.key)}" data-key="${UI.esc(s.key)}">
                      <option value="true"${String(s.value) === 'true' ? ' selected' : ''}>Enabled</option>
@@ -3214,6 +3221,23 @@ async function pageSettings(root) {
       </div>`).join('');
 
   renderLogoControl(settings['company.logoUrl'] ? settings['company.logoUrl'].value : '');
+  const bankBox = document.getElementById('s_finance.bankAccounts');
+  if (bankBox) {
+    const preview = () => {
+      const seen = new Set();
+      const rows = bankBox.value.split(/\r?\n|;/).map(l => l.split('|').map(x => x.trim())).filter(r => r[0]);
+      document.getElementById('bankPreview').innerHTML = rows.length ? `<div class="table-wrap"><table class="data">
+        <thead><tr><th>GL name (picked on payments)</th><th>Bank</th><th>Account no / IBAN</th><th></th></tr></thead>
+        <tbody>${rows.map(r => {
+          const dup = seen.has(r[0].toLowerCase()); seen.add(r[0].toLowerCase());
+          return `<tr><td><strong>${UI.esc(r[0])}</strong></td><td>${UI.esc(r[1] || '')}</td><td class="mono">${UI.esc(r[2] || '')}</td>
+            <td>${dup ? '<span class="state-error">same GL name twice: only the first is used</span>'
+              : !r[1] || !r[2] ? '<span class="muted">bank name or account missing: the voucher shows it blank</span>' : ''}</td></tr>`;
+        }).join('')}</tbody></table></div>` : '<div class="muted">No bank accounts yet: payments do not ask for one.</div>';
+    };
+    bankBox.oninput = preview;
+    preview();
+  }
 
   document.getElementById('saveSettings').onclick = async e => {
     const btn = e.target;
