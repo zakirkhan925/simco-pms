@@ -18003,6 +18003,11 @@ function paymentVoucherHtml(p) {
   const day = v => { if (!v) return ''; const t = new Date(String(v).slice(0, 10) + 'T00:00:00');
     return isNaN(t) ? '' : t.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: '2-digit' }).replace(/ /g, '-'); };
   const BANK_METHODS = ['Bank transfer', 'Cheque', 'Online'];
+  // Who printed this copy and when, in Pakistan time (owner's request, 14 Nov 2026).
+  const printedAt = (() => { const n = new Date();
+    const f = o => n.toLocaleString('en-GB', Object.assign({ timeZone: 'Asia/Karachi' }, o));
+    return f({ day: '2-digit' }) + '-' + f({ month: 'short' }) + '-' + f({ year: 'numeric' }) + ' ' +
+      f({ hour: 'numeric', minute: '2-digit', hour12: true }).toUpperCase(); })();
 
   let pay, id, date, payee, desc, gross, tax = 0, method = '', floatName = '', reversed = false;
   if (k === 'VENDORPAY') {
@@ -18120,7 +18125,7 @@ ${reversed ? `<div class="rev">REVERSED${pay.ReversedAt ? ' on ' + e(day(pay.Rev
           <td class="under" style="border-bottom:none;border-right:none">Date</td></tr></table>
   </td></tr>
 </table>
-<p class="muted">PMS ${e(id || '')}${pay.Method ? ' · ' + e(pay.Method) : ''} · printed ${e(day(new Date().toISOString()))}</p>
+<p class="muted">PMS ${e(id || '')}${pay.Method ? ' · ' + e(pay.Method) : ''} · Printed by ${e((App.user && App.user.Name) || 'unknown')} on ${e(printedAt)}</p>
 </body></html>`;
 }
 
