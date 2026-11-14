@@ -5072,6 +5072,20 @@ async function renderBudgetWorks(projectId) {
   }
 }
 
+/**
+ * "Paid from": the company bank account a head-office payment came from (14 Nov 2026),
+ * for its payment voucher. Offered once the bank list is set up in Settings
+ * (finance.bankAccounts) and the server sends it. `cash` adds "Cash in hand" as the blank.
+ */
+function bankFieldFor(cash) {
+  const list = (App.settings && App.settings.bankAccounts) || [];
+  if (!list.length) return [];
+  return [{ name: 'BankAccount', label: cash ? 'Paid from' : 'Paid from bank account', type: 'select',
+    options: [{ value: '', label: cash ? 'Cash in hand' : '— for a bank, cheque or online payment —' }]
+      .concat(list.map(n => ({ value: n, label: n }))),
+    hint: cash ? 'Printed on the voucher' : 'Needed for bank, cheque and online payments; printed on the voucher' }];
+}
+
 function budgetView() {
   let v = 'both';
   try { v = localStorage.getItem('pms_budget_view') || 'both'; } catch (e) {}
@@ -6461,7 +6475,7 @@ async function openVendorPaymentForm(vendor, onSaved) {
       hint: 'Deducted at source. The vendor receives the amount less this.' },
     { name: 'Method', label: 'Method', type: 'select',
       options: (App.enums.PAYMENT_METHODS || ['Bank transfer', 'Cheque', 'Cash']) },
-    { name: 'Reference', label: 'Cheque / transfer reference' },
+    ...bankFieldFor(), { name: 'Reference', label: 'Cheque / transfer number' },
     { name: 'Remarks', label: 'Remarks', type: 'textarea', span: 2 }
   ];
   const body = UI.el('div');
@@ -13226,7 +13240,7 @@ async function subAdvanceDialog(s, agreements, onDone) {
     { name: 'Amount', label: 'Amount', type: 'number', required: true },
     { name: 'PaymentDate', label: 'Date', type: 'date' },
     { name: 'Method', label: 'Paid by', type: 'select', options: ['Bank transfer', 'Cheque', 'Cash'] },
-    { name: 'Reference', label: 'Cheque / transfer reference' },
+    ...bankFieldFor(), { name: 'Reference', label: 'Cheque / transfer number' },
     { name: 'Remarks', label: 'Remarks', type: 'textarea', span: 2 }
   ];
   const body = UI.el('div');
@@ -13258,7 +13272,7 @@ function releaseRetentionDialog(agreementId, held) {
       hint: 'Up to ' + cash(held) + ' is held' },
     { name: 'PaymentDate', label: 'Date', type: 'date' },
     { name: 'Method', label: 'Paid by', type: 'select', options: ['Bank transfer', 'Cheque', 'Cash'] },
-    { name: 'Reference', label: 'Cheque / transfer reference' },
+    ...bankFieldFor(), { name: 'Reference', label: 'Cheque / transfer number' },
     { name: 'Remarks', label: 'Reason (required)', type: 'textarea', required: true, span: 2,
       hint: 'e.g. defects liability period over' }
   ];
@@ -13784,7 +13798,7 @@ function subPaymentDialog(billId, outstanding) {
     // bank transfer with no reference (found 24 Oct 2026).
     { name: 'Method', label: 'Method', type: 'select',
       options: ['Bank transfer', 'Cheque', 'Cash', 'Online'] },
-    { name: 'Reference', label: 'Cheque / transfer reference' },
+    ...bankFieldFor(), { name: 'Reference', label: 'Cheque / transfer number' },
     { name: 'Remarks', label: 'Remarks', type: 'textarea', span: 2 }
   ];
   const body = UI.el('div');
@@ -14100,15 +14114,22 @@ async function pageCashAccount(root, accountId) {
           ? `<a href="#" class="link" data-creport="${r.ReportID}">${r.ReportID}</a>`
           : '<span class="muted">open</span>' },
       // An entry stays correctable until the period it sits in is signed off.
-      { key: 'actions', label: '', align: 'right', width: '72px', render: r => r.CanEdit
+      { key: 'actions', label: '', align: 'right', width: '72px', render: r =>
+          // Cash issued from head office prints a payment voucher (14 Nov 2026), once the server can.
+          (r.Type === 'ISSUE' && App.settings && 'bankAccounts' in App.settings
+            ? `<div class="row-actions"><button class="btn btn-sm" data-txnvoucher="${UI.esc(r.CashTxnID)}">Voucher</button></div>` : '') +
+          (r.CanEdit
           ? `<div class="row-actions"><button class="btn btn-sm"
                data-edittxn="${UI.esc(r.CashTxnID)}">Edit</button></div>`
-          : '' }
+          : '') }
     ],
     rows: d.ledger,
     empty: UI.emptyState('Nothing yet', 'Cash issued and money spent will appear here.')
   });
 
+  document.getElementById('cashLedger').querySelectorAll('[data-txnvoucher]').forEach(b => {
+    b.onclick = () => printRecord('CASHISSUE', b.dataset.txnvoucher);
+  });
   document.getElementById('cashLedger').querySelectorAll('[data-edittxn]').forEach(b => {
     b.onclick = () => cashEditDialog(b.dataset.edittxn, () => navigate('cash-account', accountId));
   });
@@ -14162,6 +14183,9 @@ function cashIssueDialog(accountId, position) {
     { name: 'Amount', label: 'Amount to issue', type: 'number', required: true,
       hint: position.headroom === null ? '' : 'At most ' + cash(position.headroom) + ' before the ceiling' },
     { name: 'TxnDate', label: 'Date', type: 'date', value: new Date().toISOString().slice(0, 10) },
+    // Paid from a bank account or cash in hand, for the payment voucher (14 Nov 2026).
+    ...bankFieldFor(true),
+    ...(App.settings && 'bankAccounts' in App.settings ? [{ name: 'Reference', label: 'Cheque / transfer number' }] : []),
     { name: 'Description', label: 'Note', span: 2, placeholder: 'August advance' }
   ];
   const body = UI.el('div');
@@ -17431,6 +17455,7 @@ const PRINT_TITLES = { PO: 'Purchase order', PR: 'Purchase request', GRN: 'Goods
                        SUBSTMT: 'Subcontractor statement of account',
                        SUPINV: 'Supplier invoice',
                        SUBPAY: 'Subcontractor payment voucher',
+                       CASHISSUE: 'Payment voucher',
                        STATEMENTS: 'Statements of account' };
 
 async function printRecord(kind, recordId, options) {
@@ -17937,8 +17962,148 @@ function buildReportPrintHtml(p) {
   });
 }
 
+/**
+ * The payment voucher in the accounts' own format (owner's request, 14 Nov 2026):
+ * the Bank Payment Voucher (BPV) they kept in Excel for the CFO to post in
+ * QuickBooks, filled from the payment itself. A vendor payment, a subcontractor
+ * payment (bill, advance, retention) and cash issued to a float all print it.
+ * Paid by bank, cheque or online it is a BPV; in cash, a Cash Payment Voucher (CPV).
+ * The entry: Dr the payee, Cr the bank (or cash, or the float), and for a vendor
+ * payment with tax withheld, Cr withholding tax payable for the tax.
+ */
+function paymentVoucherHtml(p) {
+  const c = p.company || {}, d = p.data || {}, L = p.labels || {}, k = p.kind;
+  const proj = p.voucherProject || d.project || null;
+  const banks = c.banks || [];
+  const n2 = x => Number(x || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const day = v => { if (!v) return ''; const t = new Date(String(v).slice(0, 10) + 'T00:00:00');
+    return isNaN(t) ? '' : t.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: '2-digit' }).replace(/ /g, '-'); };
+  const BANK_METHODS = ['Bank transfer', 'Cheque', 'Online'];
+
+  let pay, id, date, payee, desc, gross, tax = 0, method = '', floatName = '', reversed = false;
+  if (k === 'VENDORPAY') {
+    pay = d.payment || {}; id = pay.VendorPaymentID; date = pay.PaymentDate;
+    payee = d.vendor ? d.vendor.CompanyName : (L.VendorID || pay.VendorID);
+    gross = Number(pay.Amount) || 0; tax = Number(pay.TaxWithheld) || 0; method = pay.Method || '';
+    desc = pay.Remarks || (d.invoice ? 'Payment against invoice ' + (d.invoice.InvoiceNumber || d.invoice.SupplierInvoiceID)
+      : pay.POID ? 'Advance against ' + pay.POID : 'Payment on account');
+    reversed = !!d.isReversed || pay.Status === 'Reversed';
+  } else if (k === 'SUBPAY') {
+    pay = d.payment || {}; id = pay.SubPaymentID; date = pay.PaymentDate;
+    payee = d.subcontractor ? d.subcontractor.CompanyName : (L.SubcontractorID || pay.SubcontractorID);
+    gross = Number(pay.Amount) || 0; method = pay.Method || '';
+    const what = { Advance: 'Advance', Retention: 'Retention release', Bill: 'Bill payment' }[pay.PaymentType] || 'Payment';
+    const b = d.bill;
+    desc = what + (b ? ' against bill ' + (b.BillNumber && b.BillNumber !== b.SubBillID ? b.BillNumber : b.SubBillID) : '') +
+      (d.agreement ? ' (' + d.agreement.AgreementID + (d.agreement.Scope ? ' — ' + d.agreement.Scope : '') + ')' : '') +
+      (pay.Remarks ? ' — ' + pay.Remarks : '');
+    reversed = !!pay.IsReversed || pay.Status === 'Reversed';
+  } else {
+    pay = d.transaction || {}; id = pay.CashTxnID; date = pay.TxnDate;
+    const a = d.account || {};
+    payee = a.CustodianName || a.Name || a.CashAccountID;
+    gross = Number(pay.Amount) || 0; method = pay.BankAccount ? 'Bank transfer' : 'Cash';
+    desc = (pay.Description || 'Working cash advance') + ' — float ' + (a.Name || a.CashAccountID);
+  }
+
+  // What it was paid from: a bank account, the cash in hand, or a site's working float.
+  const fromFloat = k !== 'CASHISSUE' && (method === 'Cash (working float)' || (!!pay.CashAccountID && !pay.BankAccount));
+  if (fromFloat) floatName = d.account ? (d.account.Name || d.account.CashAccountID) : (L.CashAccountID || 'Working cash');
+  const byBank = !!pay.BankAccount || (!fromFloat && BANK_METHODS.indexOf(method) !== -1);
+  const bank = pay.BankAccount ? banks.find(b => b.name === pay.BankAccount) || { name: pay.BankAccount } : null;
+  const creditGl = pay.BankAccount || (fromFloat ? floatName : byBank ? 'Bank' : 'Cash in hand');
+  const type = byBank ? 'BPV' : 'CPV';
+  const title = byBank ? 'Bank Payment Voucher (BPV)' : 'Cash Payment Voucher (CPV)';
+  const t = date ? new Date(String(date).slice(0, 10) + 'T00:00:00') : null;
+  const voucherNo = type + '/' + (t && !isNaN(t) ? t.toLocaleString('en-GB', { month: 'short' }).toUpperCase() + '/' + t.getFullYear() : '') + '/' + (id || '');
+  const net = Math.round((gross - tax) * 100) / 100;
+
+  const headOffice = !proj;
+  const projCode = proj ? (proj.ProjectCode || proj.ProjectName || proj.ProjectID) : (headOffice ? 'Head Office' : '');
+  const projLoc = proj ? (proj.Location || proj.ProjectName || '') : (headOffice ? 'Head Office' : '');
+  const office = fromFloat ? floatName : 'Head Office';
+
+  const lines = [[payee, projCode, desc, gross, 0]];
+  lines.push([creditGl, projCode, creditGl + (pay.Reference ? ' — ' + pay.Reference : ''), 0, net]);
+  if (tax) lines.push(['Withholding tax payable', projCode, 'Tax withheld from ' + payee, 0, tax]);
+  const totalDr = lines.reduce((s, l) => s + l[3], 0), totalCr = lines.reduce((s, l) => s + l[4], 0);
+  const e = x => UI.esc(x == null ? '' : String(x));
+
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>${e(voucherNo)}</title>
+<style>
+  @page{size:A4 portrait;margin:12mm}
+  *{box-sizing:border-box}
+  body{font:12px Arial,Helvetica,sans-serif;color:#000;margin:0 auto;max-width:190mm}
+  table{border-collapse:collapse;width:100%}
+  td,th{border:1px solid #000;padding:5px 6px;vertical-align:middle}
+  .v{border:2px solid #000}
+  .logo{width:28%;background:#111;text-align:center;padding:8px}
+  .logo img{max-width:100%;max-height:70px}
+  .co{text-align:center;font-size:21px;color:#1F6FBF;font-weight:600;letter-spacing:.3px}
+  .tag{text-align:center;font-size:12.5px;font-weight:600;letter-spacing:.2px}
+  .title{text-align:center;font-size:17px;font-weight:600}
+  .lbl{width:15%;font-size:11.5px}
+  .val{text-align:center}
+  .num{text-align:right;white-space:nowrap}
+  .lines th{font-weight:400;text-align:center;font-size:11.5px}
+  .lines td{height:46px;vertical-align:bottom}
+  .tot td{font-weight:600}
+  .sig td{border:none;padding:16px 6px 2px;vertical-align:bottom}
+  .line{border-bottom:1px solid #000;display:inline-block;min-width:170px}
+  .under{font-size:11px;text-align:center}
+  .rev{border:2px solid #8C1D18;color:#8C1D18;font-weight:700;text-align:center;padding:6px;margin-bottom:8px;font-size:14px}
+  .muted{color:#555;font-size:10px}
+  @media print{.no-print{display:none}}
+</style></head><body>
+${reversed ? `<div class="rev">REVERSED${pay.ReversedAt ? ' on ' + e(day(pay.ReversedAt)) : ''}${pay.ReversalReason ? ' — ' + e(pay.ReversalReason) : ''}</div>` : ''}
+<table class="v">
+  <tr><td class="logo" rowspan="2">${c.logoUrl ? `<img src="${e(c.logoUrl)}" alt="">` : `<span style="color:#fff;font-size:20px;font-weight:700">${e(c.name || '')}</span>`}</td>
+      <td colspan="3"><div class="co">${e(c.name || '')}</div>${c.tagline ? `<div class="tag">${e(c.tagline)}</div>` : ''}</td></tr>
+  <tr><td colspan="3" class="title">${e(title)}</td></tr>
+  <tr><td class="lbl">Bank Name &amp; Address</td><td class="val">${e(bank ? (bank.bank || bank.name) : byBank ? '' : '—')}</td>
+      <td class="lbl">Voucher #</td><td class="val">${e(voucherNo)}</td></tr>
+  <tr><td class="lbl">Account #</td><td class="val">${e(bank ? bank.account : '')}</td>
+      <td class="lbl">Date</td><td class="val">${e(day(date))}</td></tr>
+  <tr><td class="lbl">${method === 'Cheque' || !byBank ? 'CHQ #' : 'CHQ / Ref #'}</td><td class="val">${e(pay.Reference || '')}</td>
+      <td class="lbl">Office:</td><td class="val">${e(office)}</td></tr>
+  <tr><td class="lbl" rowspan="2">Pay to :</td><td class="val" rowspan="2">${e(payee)}</td>
+      <td class="lbl">Project Location ;</td><td class="val">${e(projLoc)}</td></tr>
+  <tr><td class="lbl">Project Code ;</td><td class="val">${e(projCode)}</td></tr>
+  <tr><td class="lbl" style="height:48px">Description</td><td colspan="3">${e(desc)}</td></tr>
+</table>
+<table class="v lines" style="border-top:none">
+  <tr><th style="width:17%">Account/GL Code</th><th style="width:16%">Project Code / Name</th><th>Description</th>
+      <th style="width:14%">Dr.</th><th style="width:14%">CR.</th></tr>
+  ${lines.map(l => `<tr><td>${e(l[0])}</td><td>${e(l[1])}</td><td>${e(l[2])}</td>
+      <td class="num">${l[3] ? n2(l[3]) : ''}</td><td class="num">${l[4] ? n2(l[4]) : ''}</td></tr>`).join('')}
+  <tr class="tot"><td></td><td></td><td class="num">TOTAL&nbsp; ${e((App.settings && App.settings.currency) || 'PKR')}</td><td class="num">${n2(totalDr)}</td><td class="num">${n2(totalCr)}</td></tr>
+  <tr><td>In Words;</td><td colspan="4">${e(amountInWords(totalDr))}</td></tr>
+</table>
+<table class="v" style="border-top:none"><tr><td style="border:none;padding:0 8px 10px">
+  <table class="sig">
+    <tr><td style="width:16%">Prepared by ;</td><td><span class="line">${e(L.CreatedBy || '')}</span><div class="under">Accounts Dept</div></td>
+        <td></td><td></td><td style="width:22%;text-align:right">Dated: <span class="line" style="min-width:90px">${e(day(date))}</span></td></tr>
+    <tr><td>Reviewed by;</td><td><span class="line"></span><div class="under">Chief Financial Officer</div></td>
+        <td style="width:12%">Verified By:</td><td><span class="line"></span><div class="under">Audit Dept</div></td>
+        <td style="text-align:right">Dated: <span class="line" style="min-width:90px"></span></td></tr>
+    <tr><td>Approved by;</td><td><span class="line"></span><div class="under">CEO/MD</div></td><td></td><td></td>
+        <td style="text-align:right">Dated: <span class="line" style="min-width:90px"></span></td></tr>
+  </table></td></tr>
+  <tr><td style="padding:0">
+    <table><tr><td rowspan="2" style="width:17%;border-left:none;border-bottom:none">${byBank ? 'Cheque Received by:' : 'Cash Received by:'}</td>
+      <td style="height:40px"></td><td></td><td style="border-right:none"></td></tr>
+      <tr><td class="under" style="border-bottom:none">Name</td><td class="under" style="border-bottom:none">Signature</td>
+          <td class="under" style="border-bottom:none;border-right:none">Date</td></tr></table>
+  </td></tr>
+</table>
+<p class="muted">PMS ${e(id || '')}${pay.Method ? ' · ' + e(pay.Method) : ''} · printed ${e(day(new Date().toISOString()))}</p>
+</body></html>`;
+}
+
 function buildPrintHtml(p) {
   if (p.kind === 'STATEMENTS') return buildStatementsHtml(p);
+  // Payment vouchers in the accounts' BPV / CPV format (14 Nov 2026).
+  if (p.kind === 'VENDORPAY' || p.kind === 'SUBPAY' || p.kind === 'CASHISSUE') return paymentVoucherHtml(p);
   if (p.kind === 'REPORT') return buildReportPrintHtml(p);
   const c = p.company;
   const title = PRINT_TITLES[p.kind] || 'Document';
@@ -17980,7 +18145,7 @@ function buildPrintHtml(p) {
 const PRINT_REF_FIELD = {
   PO: 'POID', PR: 'PRID', GRN: 'GRNID', ISSUE: 'IssueID', RAR: 'RARID',
   SUBBILL: 'SubBillID', RFQ: 'RFQID', VENDORPAY: 'VendorPaymentID',
-  CASHREPORT: 'CashReportID', SUPINV: 'SupplierInvoiceID', SUBPAY: 'SubPaymentID'
+  CASHREPORT: 'CashReportID', SUPINV: 'SupplierInvoiceID', SUBPAY: 'SubPaymentID', CASHISSUE: 'CashTxnID'
 };
 
 /** A header value as it should read on paper: dates as dates, amounts with separators. */
