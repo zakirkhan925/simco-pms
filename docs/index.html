@@ -18046,6 +18046,11 @@ function paymentVoucherHtml(p) {
   const t = date ? new Date(String(date).slice(0, 10) + 'T00:00:00') : null;
   const voucherNo = type + '/' + (t && !isNaN(t) ? t.toLocaleString('en-GB', { month: 'short' }).toUpperCase() + '/' + t.getFullYear() : '') + '/' + (id || '');
   const net = Math.round((gross - tax) * 100) / 100;
+  // Who recorded the payment, and the payee's contact person (14 Nov 2026). An older server sends
+  // neither; its subcontractor labels are the bill's, so leave Prepared by blank rather than wrong.
+  const preparedBy = 'voucherPreparedBy' in p ? (p.voucherPreparedBy || '') : (k === 'SUBPAY' ? '' : (L.CreatedBy || ''));
+  const contact = p.voucherContact && p.voucherContact.ContactPerson && p.voucherContact.ContactPerson !== payee
+    ? p.voucherContact.ContactPerson : '';
 
   const headOffice = !proj;
   const projCode = proj ? (proj.ProjectCode || proj.ProjectName || proj.ProjectID) : (headOffice ? 'Head Office' : '');
@@ -18095,7 +18100,7 @@ ${reversed ? `<div class="rev">REVERSED${pay.ReversedAt ? ' on ' + e(day(pay.Rev
       <td class="lbl">Date</td><td class="val">${e(day(date))}</td></tr>
   <tr><td class="lbl">${method === 'Cheque' || !byBank ? 'CHQ #' : 'CHQ / Ref #'}</td><td class="val">${e(pay.Reference || '')}</td>
       <td class="lbl">Office:</td><td class="val">${e(office)}</td></tr>
-  <tr><td class="lbl" rowspan="2">Pay to :</td><td class="val" rowspan="2">${e(payee)}</td>
+  <tr><td class="lbl" rowspan="2">Pay to :</td><td class="val" rowspan="2">${e(payee)}${contact ? `<div style="font-size:11px;margin-top:3px">Contact: ${e(contact)}</div>` : ''}</td>
       <td class="lbl">Project Location ;</td><td class="val">${e(projLoc)}</td></tr>
   <tr><td class="lbl">Project Code ;</td><td class="val">${e(projCode)}</td></tr>
   <tr><td class="lbl" style="height:48px">Description</td><td colspan="3">${e(desc)}</td></tr>
@@ -18110,7 +18115,7 @@ ${reversed ? `<div class="rev">REVERSED${pay.ReversedAt ? ' on ' + e(day(pay.Rev
 </table>
 <table class="v" style="border-top:none"><tr><td style="border:none;padding:0 8px 10px">
   <table class="sig">
-    <tr><td style="width:16%">Prepared by ;</td><td><span class="line">${e(L.CreatedBy || '')}</span><div class="under">Accounts Dept</div></td>
+    <tr><td style="width:16%">Prepared by ;</td><td><span class="line">${e(preparedBy)}</span><div class="under">Accounts Dept</div></td>
         <td></td><td></td><td style="width:22%;text-align:right">Dated: <span class="line" style="min-width:90px">${e(day(date))}</span></td></tr>
     <tr><td>Reviewed by;</td><td><span class="line"></span><div class="under">Chief Financial Officer</div></td>
         <td style="width:12%">Verified By:</td><td><span class="line"></span><div class="under">Audit Dept</div></td>
