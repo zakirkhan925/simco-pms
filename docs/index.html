@@ -15336,7 +15336,11 @@ async function payrollSheetPage(root, K, id) {
   if (d.canReturn) acts.push(`<button class="btn" id="psReturn">Return</button>`);
   if (d.canCheck) acts.push(`<button class="btn btn-primary" id="psCheck">Mark checked</button>`);
   if (d.canApprove) acts.push(`<button class="btn btn-primary" id="psApprove">Approve</button>`);
-  if (d.canPay && d.unpaidBank > 0) acts.push(`<button class="btn" id="psPayBank">Record bank payment</button>`);
+  // Head office pays from a company account (16 Nov 2026): offered whenever anything is unpaid, on a server that
+  // supports it; an older server offers it only for the men paid by bank, as before.
+  if (d.canPay && ('unpaidAll' in d ? d.unpaidAll > 0 : d.unpaidBank > 0)) {
+    acts.push(`<button class="btn" id="psPayBank">${'unpaidAll' in d ? 'Pay from bank' : 'Record bank payment'}</button>`);
+  }
   if (d.canPay && d.unpaidCash > 0) acts.push(`<button class="btn btn-primary" id="psPayCash">Pay cash from float</button>`);
 
   root.innerHTML = pageHead(id, `${K.noun} · ${s.MonthLabel} · ${s.ProjectName}`, acts.join(' ')) +
@@ -15603,6 +15607,7 @@ function payrollAddPeople(K, d, s, addLine) {
 }
 
 function payrollPayDialog(K, d, id, mode) {
+  if (mode === 'Bank' && 'unpaidAll' in d) return payrollBankDialog(K, d, id);
   const amount = mode === 'Cash' ? d.unpaidCash : d.unpaidBank;
   const fields = mode === 'Cash'
     ? [{ name: 'CashAccountID', label: 'From float', type: 'select', required: true,
@@ -15624,6 +15629,53 @@ function payrollPayDialog(K, d, id, mode) {
           const data = UI.validate(form, fields);
           if (!data) return;
           data.Mode = mode;
+          m.busy(true);
+          try { UI.success((await api(K.pay, id, data)).message); m.close(); navigate(K.detail, id); }
+          catch (e) { m.busy(false); UI.error('Could not pay', e.message); }
+        } }
+    ]
+  });
+}
+
+/**
+ * Paid by head office from one of the company's bank accounts (owner, 16 Nov 2026), as vendors and
+ * subcontractors are: everyone not yet paid, or only the men whose own mode is bank.
+ */
+function payrollBankDialog(K, d, id) {
+  const both = d.unpaidBank > 0 && d.unpaidBank !== d.unpaidAll;
+  const fields = (both ? [{ name: 'Who', label: 'Pay', type: 'select', required: true, span: 2,
+      options: [{ value: 'all', label: 'Everyone not yet paid — ' + cash(d.unpaidAll) },
+                { value: 'bank', label: 'Only those paid by bank — ' + cash(d.unpaidBank) }] }] : [])
+    .concat([
+      { name: 'Method', label: 'Paid by', type: 'select', required: true, options: ['Bank transfer', 'Cheque', 'Online'] },
+      ...bankFieldFor(),
+      { name: 'Reference', label: 'Cheque or transfer number', required: true },
+      { name: 'TxnDate', label: 'Date', type: 'date', required: true, value: new Date().toISOString().slice(0, 10) }
+    ]);
+  const body = UI.el('div');
+  const intro = UI.el('p', { style: 'margin:0 0 12px' });
+  body.appendChild(intro);
+  const form = UI.form(fields, { Who: 'all', Method: 'Cheque' });
+  body.appendChild(form);
+  const amountNow = () => { const v = UI.readForm(form); return v.Who === 'bank' ? d.unpaidBank : d.unpaidAll; };
+  const say = () => {
+    intro.textContent = `One cheque or transfer of ${cash(amountNow())} from a company bank account, not from a site float: ` +
+      'cashed and handed out to the people on the sheet. Each of them is marked paid with the account and the cheque or ' +
+      'transfer number.';
+  };
+  say();
+  const who = form.querySelector('[name="Who"]');
+  if (who) who.onchange = say;
+  UI.modal({
+    title: 'Pay ' + id + ' from bank', body,
+    footer: [
+      { label: 'Cancel', onClick: m => m.close() },
+      { label: 'Record payment', class: 'btn-primary', onClick: async m => {
+          const data = UI.validate(form, fields);
+          if (!data) return;
+          data.Mode = 'Bank';
+          data.AllUnpaid = data.Who !== 'bank';
+          delete data.Who;
           m.busy(true);
           try { UI.success((await api(K.pay, id, data)).message); m.close(); navigate(K.detail, id); }
           catch (e) { m.busy(false); UI.error('Could not pay', e.message); }
