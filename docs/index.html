@@ -12961,8 +12961,11 @@ async function agreementForm(existing, subId, onSaved, fixedProjectId) {
       options: projects.map(p => ({ value: p.ProjectID,
         label: p.ProjectID + ' — ' + p.ProjectName +
                (p.Status === 'Active' ? '' : ' (' + p.Status + ')') })),
-      readonly: !!existing,
-      hint: projects.length ? '' : 'No open projects — create one first' },
+      // A draft or returned agreement can be moved to the right project
+      // (owner's request, 16 Nov 2026); the server refuses once anything is billed or paid.
+      readonly: !!existing && ['Draft', 'Returned'].indexOf(existing.Status) === -1,
+      hint: projects.length ? (existing && ['Draft', 'Returned'].indexOf(existing.Status) !== -1
+        ? 'Can be changed until the agreement is approved' : '') : 'No open projects — create one first' },
     { name: 'SubcontractorID', label: 'Subcontractor', type: 'select', required: true,
       options: subs.map(x => ({ value: x.SubcontractorID, label: x.CompanyName + ' (' + x.Trade + ')' })),
       readonly: !!existing },
@@ -13052,7 +13055,13 @@ async function agreementForm(existing, subId, onSaved, fixedProjectId) {
             const res = existing
               ? await api('updateAgreement', existing.AgreementID, data)
               : await api('createAgreement', data.ProjectID, data);
-            UI.success(res.message);
+            // An older server ignores a project change; say so rather than let it look done.
+            if (existing && data.ProjectID && data.ProjectID !== existing.ProjectID &&
+                res.data && res.data.ProjectID !== data.ProjectID) {
+              UI.warn('Project not changed', 'The other changes were saved, but the server does not support moving an agreement yet.');
+            } else {
+              UI.success(res.message);
+            }
             m.close();
             if (onSaved) onSaved(res.data);
           } catch (e) { m.busy(false); UI.error('Could not save', e.message); }
