@@ -2558,7 +2558,7 @@ function queueHtml(rows) {
       </div>
       <div class="queue-amount">${r.amount ? UI.fmt.money(r.amount, App.settings.currencySymbol || 'Rs') : ''}</div>
       <div class="queue-age ${old ? 't-over' : 'muted'}">${UI.esc(age)}</div>
-      <button class="btn btn-sm" data-go="${UI.esc(r.route)}">${UI.esc(r.action)}</button>
+      <button class="btn btn-sm" data-go="${UI.esc(r.route)}"${r.route === 'agreement' && r.id ? ` data-id="${UI.esc(r.id)}"` : ''}>${UI.esc(r.action)}</button>
     </li>`;
   }).join('')}</ul>`;
 }
@@ -2713,7 +2713,7 @@ async function pageDashboard(root) {
   } else {
     qHost.innerHTML = queueHtml(q.rows);
     qHost.querySelectorAll('button[data-go]').forEach(b => {
-      b.onclick = () => navigate(b.dataset.go);
+      b.onclick = () => b.dataset.id ? navigate(b.dataset.go, b.dataset.id) : navigate(b.dataset.go);
     });
   }
 
@@ -12750,8 +12750,10 @@ function lineGrid(items, units, opts) {
              <option value="">—</option>${unitOptions(row.Unit)}</select></td>
        <td><input class="input" type="number" step="any" min="0" data-f="Quantity"
                   value="${row.Quantity === undefined ? '' : row.Quantity}"></td>
-       <td><input class="input" type="number" step="any" min="0" data-f="Rate"${o.ratesLocked || (locked && !o.billedRates) ? ' readonly' : ''}
-                  title="${o.ratesLocked ? 'Approved agreement: only an administrator can change a rate' : ''}"
+       <td><input class="input" type="number" step="any" min="0" data-f="Rate"${o.ratesLocked || (locked && !o.billedRates) ||
+                  (o.existingRatesLocked && row.AgreementItemID) ? ' readonly' : ''}
+                  title="${o.existingRatesLocked && row.AgreementItemID ? 'Approved agreement: change the rate through Revise rates'
+                    : o.ratesLocked ? 'Approved agreement: only an administrator can change a rate' : ''}"
                   value="${row.Rate === undefined ? '' : row.Rate}"></td>
        <td class="num"><span class="line-amount">—</span></td>
        <td><button class="line-drop" type="button" title="${locked
@@ -12880,7 +12882,11 @@ function agreementLinesEditor(agreementId, items, units, onSaved, rates) {
     `<p class="muted" style="margin:0 0 12px;font-size:13px">
        Each line is measured separately. A line that has already been billed keeps its unit, and its
        quantity can only grow.</p>` +
-    (r.locked
+    (r.revisions && r.approved
+      ? `<div class="banner banner-warn" style="margin:0 0 12px">This agreement is approved: a line's rate changes through
+           <strong>Revise rates</strong>, which goes for approval. ${r.locked ? 'A new line is priced by an administrator.'
+           : 'You may still price a new line here.'}</div>`
+      : r.locked
       ? `<div class="banner banner-warn" style="margin:0 0 12px">This agreement is approved: only an administrator can
            change a rate or price a new line.</div>`
       : r.approved
@@ -12888,7 +12894,8 @@ function agreementLinesEditor(agreementId, items, units, onSaved, rates) {
              quantity billed so far is added to (or taken off) the next bill as a <strong>rate revision</strong>.
              Bills already approved stay as they are.</div>`
         : '');
-  const grid = lineGrid(items, units, { ratesLocked: !!r.locked, billedRates: !!r.approved && !r.locked });
+  const grid = lineGrid(items, units, { ratesLocked: !!r.locked, existingRatesLocked: !!(r.revisions && r.approved),
+    billedRates: !!r.approved && !r.locked && !r.revisions });
   body.appendChild(grid.root);
   if (r.projectId) boqItemsFor(r.projectId).then(grid.setBoq);
   body.appendChild(UI.el('div', { id: 'lineError' }));
@@ -12931,11 +12938,18 @@ function renderAgreementLines(host, d) {
       { key: 'Amount', label: 'Amount', align: 'right', render: r => cash(r.Amount) },
       { key: 'PreviousQty', label: 'Work done', align: 'right',
         render: r => lineQty(r.PreviousQty) + ' <span class="muted">' + UI.esc(r.Unit) + '</span>' },
-      { key: 'BalanceQty', label: 'Balance', align: 'right', render: r => lineQty(r.BalanceQty) },
+      { key: 'BalanceQty', label: 'Balance', align: 'right', render: r => lineQty(r.BalanceQty) }
+    ].concat(items.some(i => Number(i.HeldAmount) > 0) ? [
+      // Billed below the agreement rate: the rest is held for a later bill (16 Nov 2026).
+      { key: 'HeldAmount', label: 'Balance rate to bill', align: 'right', render: r => Number(r.HeldAmount) > 0
+          ? `<strong>${cash(r.HeldAmount)}</strong><div class="muted" style="font-size:11.5px">${lineQty(r.HeldQty)} ${UI.esc(r.Unit)}
+             billed at ${cash(r.BilledRate)} of ${cash(r.Rate)} — up to ${cash(r.BalanceRate)} per ${UI.esc(r.Unit)} left</div>`
+          : '—' }
+    ] : []).concat([
       { key: 'ProgressPercent', label: 'Progress', width: '110px', render: r =>
           `<div class="line-bar"><span style="width:${Math.min(100, Number(r.ProgressPercent) || 0)}%"></span></div>
            <span class="muted" style="font-size:11.5px">${Number(r.ProgressPercent || 0).toFixed(1)}%</span>` }
-    ],
+    ]),
     rows: items,
     empty: UI.emptyState('No lines', '')
   });
@@ -13078,6 +13092,8 @@ async function pageAgreement(root, agreementId) {
   const actions = [];
   if (d.canEdit) actions.push(`<button class="btn" id="agrEdit">Edit</button>`);
   if (d.canEdit) actions.push(`<button class="btn" id="agrLines">Scope &amp; rates</button>`);
+  // Rates on an approved agreement: requested, then approved (16 Nov 2026).
+  if (d.canReviseRates) actions.push(`<button class="btn" id="agrRevise">Revise rates</button>`);
   if (d.canChangeStatus && d.allowedTransitions.length) {
     actions.push(`<button class="btn" id="agrStatusBtn">${a.Status === 'Terminated' ? 'Reopen' : 'Change status'}</button>`);
   }
@@ -13132,6 +13148,11 @@ async function pageAgreement(root, agreementId) {
      ${(d.retentionReleases || []).length ? `<div class="card" style="margin-top:16px">
        <div class="card-head"><h3>Retention released</h3></div>
        <div id="agrReleases"></div>
+     </div>` : ''}
+     ${(d.rateRevisions || []).length ? `<div class="card" style="margin-top:16px">
+       <div class="card-head"><h3>Rate revisions</h3>
+         <span class="muted" style="font-size:12.5px">requested with a reason, approved by another; billed work is settled on the next bill</span></div>
+       <div id="agrRevisions"></div>
      </div>` : ''}
      ${(d.recoveryNotes || []).length || d.canRaiseRecovery ? `<div class="card" style="margin-top:16px">
        <div class="card-head"><h3>Recovery notes</h3>
@@ -13234,11 +13255,15 @@ async function pageAgreement(root, agreementId) {
       onConfirm: async reason => { UI.success('Cancelled', (await api('cancelSubRecoveryNote', b.dataset.reccancel, reason)).message); back(); } }); });
   }
 
+  renderRateRevisions(document.getElementById('agrRevisions'), d, () => navigate('agreement', agreementId));
+
   const on = (id, fn) => { const b = document.getElementById(id); if (b) b.onclick = fn; };
+  on('agrRevise', () => rateRevisionForm(agreementId, d, () => navigate('agreement', agreementId)));
   on('agrEdit', () => agreementForm(a, a.SubcontractorID, () => navigate('agreement', agreementId)));
   on('agrLines', () => agreementLinesEditor(agreementId, d.items, d.units,
     () => navigate('agreement', agreementId),
-    { locked: d.canChangeRates === false, approved: ['Draft', 'Returned'].indexOf(a.Status) === -1, projectId: a.ProjectID }));
+    { locked: d.canChangeRates === false, approved: ['Draft', 'Returned'].indexOf(a.Status) === -1, projectId: a.ProjectID,
+      revisions: 'rateRevisions' in d }));
   on('agrBillBtn', () => subBillForm(agreementId, d, () => navigate('agreement', agreementId)));
   on('agrRecovery', () => subRecoveryForm(agreementId, d, () => navigate('agreement', agreementId)));
   on('agrStatusBtn', () => agreementStatusDialog(agreementId, d.allowedTransitions));
@@ -13250,6 +13275,103 @@ async function pageAgreement(root, agreementId) {
   on('agrApprove', () => decideAgreementDialog(agreementId, 'APPROVE'));
   on('agrReturn', () => decideAgreementDialog(agreementId, 'RETURN'));
   on('agrReject', () => decideAgreementDialog(agreementId, 'REJECT'));
+}
+
+/** The record of rate revisions on an agreement, with the decision buttons. */
+function renderRateRevisions(host, d, back) {
+  if (!host) return;
+  const tone = { 'Pending Approval': 'amber', Approved: 'green', Rejected: 'red', Cancelled: 'grey' };
+  const when = v => v ? UI.fmt.date(v) : '';
+  UI.table(host, {
+    columns: [
+      { key: 'RevisionID', label: 'Revision', width: '100px', render: r => `<span class="mono">${UI.esc(r.RevisionID)}</span>` },
+      { key: 'CreatedAt', label: 'Requested', render: r => UI.esc(when(r.CreatedAt)) +
+          `<br><span class="muted" style="font-size:12px">${UI.esc(r.CreatedByName || '')}</span>` },
+      { key: 'Lines', label: 'Rates', render: r => (r.Lines || []).map(l =>
+          `${UI.esc(l.Description)}: <span class="muted">${cash(l.OldRate)}</span> → <strong>${cash(l.NewRate)}</strong>` +
+          (Number(l.BilledQty) ? ` <span class="muted" style="font-size:12px">(${lineQty(l.BilledQty)} ${UI.esc(l.Unit)} billed)</span>` : '')
+        ).join('<br>') },
+      { key: 'ValueAfter', label: 'Agreement value', align: 'right', render: r =>
+          `<span class="muted">${cash(r.ValueBefore)}</span><br><strong>${cash(r.ValueAfter)}</strong>` },
+      { key: 'Reason', label: 'Reason', render: r => UI.esc(r.Reason || '') },
+      { key: 'Status', label: 'Decision', render: r => UI.badge(r.Status, tone[r.Status]) +
+          (r.DecidedByName ? `<br><span class="muted" style="font-size:12px">${UI.esc(r.DecidedByName)}, ${UI.esc(when(r.DecidedAt))}</span>` : '') +
+          (r.DecisionRemarks ? `<br><span style="font-size:12px">${UI.esc(r.DecisionRemarks)}</span>` : '') +
+          (r.CancelledByName ? `<br><span class="muted" style="font-size:12px">withdrawn by ${UI.esc(r.CancelledByName)}: ${UI.esc(r.CancelReason || '')}</span>` : '') },
+      { key: 'x', label: '', align: 'right', render: r =>
+          (r.CanDecide ? `<button class="btn btn-sm btn-primary" data-rvok="${UI.esc(r.RevisionID)}">Approve</button>
+             <button class="btn btn-sm" data-rvno="${UI.esc(r.RevisionID)}">Reject</button> ` : '') +
+          (r.CanCancel ? `<button class="btn btn-sm btn-ghost" data-rvcancel="${UI.esc(r.RevisionID)}">Withdraw</button>` : '') }
+    ],
+    rows: d.rateRevisions || []
+  });
+  host.querySelectorAll('[data-rvok]').forEach(b => { b.onclick = () => UI.confirm({
+    title: 'Approve ' + b.dataset.rvok, confirmLabel: 'Approve the new rates',
+    message: 'The new rates apply at once. Work already billed at the old rate is settled on the next bill.',
+    onConfirm: async m => {
+      try { UI.success('Approved', (await api('decideRateRevision', b.dataset.rvok, 'APPROVE', '')).message); m.close(); back(); }
+      catch (e) { UI.error('Not approved', e.message); }
+    } }); });
+  host.querySelectorAll('[data-rvno]').forEach(b => { b.onclick = () => openReasonModal({
+    title: 'Reject ' + b.dataset.rvno, label: 'Why is it rejected?', confirmLabel: 'Reject', danger: true,
+    intro: 'The rates stay as they are.',
+    onConfirm: async reason => { UI.success('Rejected', (await api('decideRateRevision', b.dataset.rvno, 'REJECT', reason)).message); back(); } }); });
+  host.querySelectorAll('[data-rvcancel]').forEach(b => { b.onclick = () => openReasonModal({
+    title: 'Withdraw ' + b.dataset.rvcancel, label: 'Why is it withdrawn?', confirmLabel: 'Withdraw', danger: true,
+    intro: 'It stays on record, marked Cancelled. The rates stay as they are.',
+    onConfirm: async reason => { UI.success('Withdrawn', (await api('cancelRateRevision', b.dataset.rvcancel, reason)).message); back(); } }); });
+}
+
+/** Asks for new rates on an approved agreement, with a reason; an approver decides. */
+function rateRevisionForm(agreementId, d, onDone) {
+  const items = d.items || [];
+  const body = UI.el('div');
+  body.innerHTML =
+    `<p class="muted" style="margin:0 0 12px;font-size:13px">Enter a new rate only on the lines that change. Nothing changes
+       until an approver approves it. Work already billed at the old rate is then settled on the next bill.</p>
+     <div class="table-wrap"><table class="lines">
+       <thead><tr><th>Line</th><th style="width:56px">UOM</th><th class="num">Quantity</th><th class="num">Billed</th>
+         <th class="num">Rate now</th><th class="num" style="width:120px">New rate</th></tr></thead>
+       <tbody>${items.map(i => `<tr data-id="${UI.esc(i.AgreementItemID)}">
+         <td>${UI.esc(i.Description)}${i.ItemCode ? ' <span class="muted">· ' + UI.esc(i.ItemCode) + '</span>' : ''}</td>
+         <td>${UI.esc(i.Unit)}</td><td class="num">${lineQty(i.Quantity)}</td><td class="num">${lineQty(i.PreviousQty)}</td>
+         <td class="num">${cash(i.Rate)}</td>
+         <td><input class="input" type="number" step="any" min="0" data-new placeholder="${UI.esc(i.Rate)}"></td></tr>`).join('')}
+       </tbody></table></div>
+     <div id="revPreview" class="muted" style="margin:10px 0;font-size:13px"></div>`;
+  const form = UI.form([{ name: 'Reason', label: 'Why are the rates being revised?', type: 'textarea', required: true, span: 2 }], {});
+  body.appendChild(form);
+  const read = () => items.map(i => ({ i, v: body.querySelector(`tr[data-id="${i.AgreementItemID}"] [data-new]`).value }))
+    .filter(x => x.v !== '' && Number(x.v) !== Number(x.i.Rate));
+  const preview = () => {
+    const changed = read();
+    const after = items.reduce((t, i) => {
+      const c = changed.find(x => x.i === i);
+      return t + Number(i.Quantity) * (c ? Number(c.v) : Number(i.Rate));
+    }, 0);
+    body.querySelector('#revPreview').innerHTML = changed.length
+      ? `${changed.length} line(s) change. Agreement value ${cash(d.agreement.ContractValue)} → <strong>${cash(after)}</strong>.`
+      : 'No line changed yet.';
+  };
+  body.querySelectorAll('[data-new]').forEach(x => { x.oninput = preview; });
+  preview();
+  UI.modal({
+    title: 'Revise rates — ' + agreementId, size: 'xwide', body,
+    footer: [
+      { label: 'Cancel', onClick: m => m.close() },
+      { label: 'Send for approval', class: 'btn-primary', onClick: async m => {
+          const data = UI.validate(form, [{ name: 'Reason', label: 'Reason', required: true }]);
+          if (!data) return;
+          const lines = read().map(x => ({ AgreementItemID: x.i.AgreementItemID, NewRate: x.v }));
+          if (!lines.length) { UI.warn('Enter a new rate on at least one line.'); return; }
+          m.busy(true);
+          try {
+            const res = await api('requestRateRevision', agreementId, { Reason: data.Reason, lines });
+            UI.success(res.message); m.close(); if (onDone) onDone();
+          } catch (e) { m.busy(false); UI.error('Not sent', e.message); }
+        } }
+    ]
+  });
 }
 
 /**
@@ -13444,13 +13566,24 @@ async function subBillForm(agreementId, agreementData, onSaved, existing) {
       PreviousAmount: Number(i.PreviousAmount || 0) - own * Number(i.Rate || 0)
     });
   });
-  const measured = allItems.filter(i => Number(i.BalanceQty) > 0 || Number(i.PreviousQty) > 0);
+  const measured = allItems.filter(i => Number(i.BalanceQty) > 0 || Number(i.PreviousQty) > 0 || Number(i.HeldAmount) > 0);
   const isMeasured = allItems.length > 0;
   // Approved recovery notes still to come off (12 Nov 2026); a bill being corrected gets its own back.
   const recAvail = Number(agreementData.recoveryPendingTotal || 0) + (editing ? Number(existing.bill.OtherRecovery || 0) : 0);
   // Owed (or to come back) on work billed before a rate changed: it goes on this bill.
   const revisions = allItems.filter(i => Number(i.RateDifference || 0) !== 0);
   const revisionTotal = revisions.reduce((t, i) => t + Number(i.RateDifference), 0);
+  // Staged rates (owner, 16 Nov 2026): a line may be billed below the agreement rate, never above;
+  // the balance held is billed on a later bill. Offered only by a server that sends what is held.
+  const staged = allItems.some(i => 'HeldAmount' in i);
+  const mineRate = {}, mineStage = {};
+  if (editing) {
+    (existing.items || []).forEach(i => {
+      const id = String(i.AgreementItemID);
+      if (i.LineType === 'Stage') mineStage[id] = { qty: Number(i.StageQty) || 0, rate: Number(i.Rate) || 0 };
+      else if (Number(i.CurrentQty) > 0) mineRate[id] = Number(i.Rate);
+    });
+  }
 
   const fields = [
     { name: 'PeriodFrom', label: 'Period from', type: 'date', required: true },
@@ -13499,7 +13632,8 @@ async function subBillForm(agreementId, agreementData, onSaved, existing) {
              <th class="num" style="width:96px">Previous</th>
              <th class="num" style="width:110px">This bill</th>
              <th class="num" style="width:96px">Cumulative</th>
-             <th class="num" style="width:90px">Rate</th>
+             <th class="num" style="width:${staged ? 110 : 90}px">Rate${staged
+               ? '<br><span class="muted" style="font-weight:400;font-size:11px">up to the agreement’s</span>' : ''}</th>
              <th class="num" style="width:120px">Amount</th>
            </tr></thead>
            <tbody>${measured.map(i => `
@@ -13515,9 +13649,26 @@ async function subBillForm(agreementId, agreementData, onSaved, existing) {
                           data-qty value="${mine[String(i.AgreementItemID)] || ''}" placeholder="0"
                           title="${lineQty(i.BalanceQty)} ${UI.esc(i.Unit)} still to do"></td>
                <td class="num" data-cum>${lineQty(i.PreviousQty)}</td>
-               <td class="num">${cash(i.Rate)}</td>
+               ${staged
+                 ? `<td><input class="input" type="number" step="any" min="0" max="${i.Rate}" data-rate
+                          value="${mineRate[String(i.AgreementItemID)] !== undefined ? mineRate[String(i.AgreementItemID)] : i.Rate}"
+                          title="Agreement rate ${UI.esc(i.Rate)}: bill lower when the rate is paid in stages, never higher">
+                      <div class="muted" style="font-size:11px">of ${cash(i.Rate)}</div></td>`
+                 : `<td class="num">${cash(i.Rate)}</td>`}
                <td class="num" data-amt>—</td>
-             </tr>`).join('')}</tbody>
+             </tr>${staged && Number(i.HeldAmount) > 0 ? `
+             <tr data-stage="${UI.esc(i.AgreementItemID)}" style="background:var(--surface-2, #f6f7f9)">
+               <td colspan="4" style="font-size:12.5px;padding-left:18px"><strong>Balance to bill:</strong>
+                 ${lineQty(i.HeldQty)} ${UI.esc(i.Unit)} billed at ${cash(i.BilledRate)} of ${cash(i.Rate)} —
+                 up to ${cash(i.BalanceRate)} per ${UI.esc(i.Unit)}, ${cash(i.HeldAmount)} in all</td>
+               <td><input class="input" type="number" step="any" min="0" max="${i.HeldQty}" data-sqty placeholder="0"
+                          value="${(mineStage[String(i.AgreementItemID)] || {}).qty || ''}"
+                          title="Quantity, already billed, on which the balance is billed now"></td>
+               <td class="muted" style="font-size:11.5px">balance qty</td>
+               <td><input class="input" type="number" step="any" min="0" max="${i.BalanceRate}" data-srate
+                          value="${(mineStage[String(i.AgreementItemID)] || {}).rate || i.BalanceRate}"></td>
+               <td class="num" data-samt>—</td>
+             </tr>` : ''}`).join('')}</tbody>
          </table>
        </div>
        <div id="sheetWarn"></div>` +
@@ -13537,10 +13688,15 @@ async function subBillForm(agreementId, agreementData, onSaved, existing) {
   const preview = UI.el('div', { class: 'totals-strip', id: 'billPreview' });
   body.appendChild(preview);
 
-  const readSheet = () => (measured || []).map((i, idx) => {
-    const tr = sheet.querySelectorAll('tbody tr')[idx];
-    return { AgreementItemID: i.AgreementItemID, CurrentQty: tr.querySelector('[data-qty]').value };
-  }).filter(r => Number(r.CurrentQty) > 0);
+  const rowOf = i => sheet.querySelector(`tr[data-id="${i.AgreementItemID}"]`);
+  const stageOf = i => sheet.querySelector(`tr[data-stage="${i.AgreementItemID}"]`);
+  const readSheet = () => (measured || []).map(i => {
+    const tr = rowOf(i), st = stageOf(i), rt = tr.querySelector('[data-rate]');
+    const r = { AgreementItemID: i.AgreementItemID, CurrentQty: tr.querySelector('[data-qty]').value };
+    if (rt) r.Rate = rt.value;
+    if (st) { r.StageQty = st.querySelector('[data-sqty]').value; r.StageRate = st.querySelector('[data-srate]').value; }
+    return r;
+  }).filter(r => Number(r.CurrentQty) > 0 || Number(r.StageQty) > 0);
 
   const recalc = () => {
     const v = UI.readForm(form);
@@ -13548,15 +13704,37 @@ async function subBillForm(agreementId, agreementData, onSaved, existing) {
     if (isMeasured) {
       gross = 0;
       const warn = [];
-      measured.forEach((i, idx) => {
-        const tr = sheet.querySelectorAll('tbody tr')[idx];
+      measured.forEach(i => {
+        const tr = rowOf(i);
         const qty = Number(tr.querySelector('[data-qty]').value || 0);
-        const amt = qty * Number(i.Rate || 0);
+        const rt = tr.querySelector('[data-rate]');
+        const rate = rt && rt.value !== '' ? Number(rt.value) : Number(i.Rate || 0);
+        const amt = qty * rate;
         gross += amt;
         tr.querySelector('[data-amt]').textContent = amt ? cash(amt) : '—';
         tr.querySelector('[data-cum]').textContent = lineQty(Number(i.PreviousQty) + qty);
         if (qty > Number(i.BalanceQty)) {
           warn.push(i.Description + ': only ' + lineQty(i.BalanceQty) + ' ' + i.Unit + ' left to bill');
+        }
+        if (rt && rate > Number(i.Rate) + 0.00005) {
+          warn.push(i.Description + ': the rate cannot be above the agreement rate of ' + cash(i.Rate));
+        } else if (rt && qty && rate < Number(i.Rate)) {
+          warn.push(i.Description + ': billed at ' + cash(rate) + ' of ' + cash(i.Rate) + '; ' + cash(Number(i.Rate) - rate) +
+            ' per ' + i.Unit + ' stays to bill on a later bill');
+        }
+        const st = stageOf(i);
+        if (st) {
+          const sq = Number(st.querySelector('[data-sqty]').value || 0);
+          const sv = st.querySelector('[data-srate]').value;
+          const sr = sv === '' ? Number(i.BalanceRate) : Number(sv);
+          const sa = sq * sr;
+          gross += sa;
+          st.querySelector('[data-samt]').textContent = sa ? cash(sa) : '—';
+          if (sq > Number(i.HeldQty)) warn.push(i.Description + ': a balance on at most ' + lineQty(i.HeldQty) + ' ' + i.Unit);
+          if (sq && sr > Number(i.BalanceRate) + 0.00005) {
+            warn.push(i.Description + ': at most ' + cash(i.BalanceRate) + ' per ' + i.Unit + ' is left to bill');
+          }
+          if (sa > Number(i.HeldAmount) + 0.004) warn.push(i.Description + ': only ' + cash(i.HeldAmount) + ' is left to bill');
         }
       });
       sheet.querySelector('#sheetWarn').innerHTML = warn.length
@@ -13589,7 +13767,7 @@ async function subBillForm(agreementId, agreementData, onSaved, existing) {
           ' left on the agreement and will be refused.</div>' : '');
   };
   form.querySelectorAll('input').forEach(i => { i.oninput = recalc; });
-  if (sheet) sheet.querySelectorAll('[data-qty]').forEach(i => { i.oninput = recalc; });
+  if (sheet) sheet.querySelectorAll('[data-qty],[data-rate],[data-sqty],[data-srate]').forEach(i => { i.oninput = recalc; });
   recalc();
 
   UI.modal({
@@ -13660,14 +13838,19 @@ async function pageSubBill(root, billId) {
              <tbody>${d.items.map(i => `
                <tr>
                  <td>${UI.esc(i.Description)}${i.ItemCode
-                   ? ' <span class="muted">· ' + UI.esc(i.ItemCode) + '</span>' : ''}</td>
+                   ? ' <span class="muted">· ' + UI.esc(i.ItemCode) + '</span>' : ''}${Number(i.BalanceRate) > 0
+                   ? `<br><span class="muted" style="font-size:12px">Billed at ${cash(i.Rate)} of ${cash(i.AgreementRate)}:
+                      ${cash(i.BalanceRate)} per ${UI.esc(i.Unit)} balance to bill on a later bill</span>` : ''}</td>
                  <td>${UI.esc(i.Unit)}</td>
                  <td class="num">${lineQty(i.ContractQty)}</td>
                  <td class="num">${lineQty(i.PreviousQty)}</td>
-                 <td class="num"><strong>${Number(i.CurrentQty) === 0 && Number(i.CurrentAmount) !== 0
+                 <td class="num"><strong>${i.LineType === 'Stage'
+                   ? '<span class="muted">balance on</span> ' + lineQty(i.StageQty)
+                   : Number(i.CurrentQty) === 0 && Number(i.CurrentAmount) !== 0
                    ? '<span class="muted">rate revision</span>' : lineQty(i.CurrentQty)}</strong></td>
                  <td class="num">${lineQty(i.CumulativeQty)}</td>
-                 <td class="num">${cash(i.Rate)}</td>
+                 <td class="num">${cash(i.Rate)}${Number(i.BalanceRate) > 0
+                   ? `<div class="muted" style="font-size:11.5px">of ${cash(i.AgreementRate)}</div>` : ''}</td>
                  <td class="num">${cash(i.CurrentAmount)}</td>
                </tr>`).join('')}</tbody>
              <tfoot><tr>
@@ -17682,9 +17865,13 @@ const PRINT_BODIES = {
           <th class="r">Previous</th><th class="r">This bill</th><th class="r">Cumulative</th>
           <th class="r">Previous amount</th><th class="r">This bill amount</th><th class="r">Cumulative amount</th></tr></thead>
         <tbody>${items.map(i => `<tr>
-          <td>${UI.esc([i.ItemCode, i.Description].filter(Boolean).join(' — '))}</td><td>${UI.esc(i.Unit || '')}</td>
-          <td class="r">${n(i.Rate)}</td><td class="r">${n(i.ContractQty)}</td><td class="r">${n(i.PreviousQty)}</td>
-          <td class="r"><strong>${n(i.CurrentQty)}</strong></td><td class="r">${n(i.CumulativeQty)}</td>
+          <td>${UI.esc([i.ItemCode, i.Description].filter(Boolean).join(' — '))}${Number(i.BalanceRate) > 0
+            ? `<br><small>Billed at ${n(i.Rate)} of ${n(i.AgreementRate)}; ${n(i.BalanceRate)} per ${UI.esc(i.Unit || 'unit')} balance to bill later</small>` : ''}</td>
+          <td>${UI.esc(i.Unit || '')}</td>
+          <td class="r">${n(i.Rate)}${Number(i.BalanceRate) > 0 ? ` <small>of ${n(i.AgreementRate)}</small>` : ''}</td>
+          <td class="r">${n(i.ContractQty)}</td><td class="r">${n(i.PreviousQty)}</td>
+          <td class="r"><strong>${i.LineType === 'Stage' ? n(i.StageQty) + ' <small>balance</small>' : n(i.CurrentQty)}</strong></td>
+          <td class="r">${n(i.CumulativeQty)}</td>
           <td class="r">${n(i.PreviousAmount)}</td><td class="r"><strong>${n(i.CurrentAmount)}</strong></td>
           <td class="r">${n(i.CumulativeAmount)}</td></tr>`).join('')}</tbody>
       </table>` : '<p class="muted">Lump-sum bill — no measured lines.</p>'}
