@@ -11836,6 +11836,7 @@ async function pageSubcontractors(root) {
     pageHead('Subcontractors', 'The trade register, and what each firm is contracted for',
       `<span id="subActions" class="flex gap-8"></span>` +
       (can('subcontract.create') ? `<button class="btn btn-primary" id="newSubBtn">+ Register subcontractor</button>` : '') +
+      `<button class="btn" id="unassignedBtn">Unassigned payments</button>` +
       `<button class="btn" id="payablesBtn">Payables</button>`) +
     `<div id="subSummary" class="stat-grid" style="margin-bottom:16px"></div>
      <div class="card">
@@ -11889,6 +11890,7 @@ async function pageSubcontractors(root) {
   };
   document.getElementById('agreementsBtn').onclick = () => navigate('agreements');
   document.getElementById('payablesBtn').onclick = () => navigate('payables');
+  document.getElementById('unassignedBtn').onclick = () => navigate('unassigned-payments');
   const nb = document.getElementById('newSubBtn');
   if (nb) nb.onclick = () => subcontractorForm(null, () => loadSubcontractors());
 
@@ -14104,6 +14106,113 @@ async function pagePayables(root) {
     a.onclick = e => { e.preventDefault(); navigate('subcontractor', a.dataset.sub); };
   });
 }
+
+/**
+ * Payments no agreement accounts for (owner, 17 Nov 2026): advances paid and never
+ * attached, so no bill recovers them. Attach each one from here where an agreement exists.
+ */
+const unassignedState = { project: '', sub: '' };
+async function pageUnassignedPayments(root) {
+  let d;
+  try { d = (await api('getUnassignedSubPayments', {})).data; }
+  catch (e) {
+    root.innerHTML = pageHead('Unassigned payments', '', `<button class="btn" id="backSubs">Back to register</button>`) +
+      UI.emptyState('Not available yet', 'This report needs the latest server update. ' + UI.esc(e.message));
+    document.getElementById('backSubs').onclick = () => navigate('subcontractors');
+    return;
+  }
+  const t = d.totals;
+  const projects = [...new Map(d.rows.map(r => [r.ProjectID, r.ProjectCode || r.ProjectName || r.ProjectID])).entries()];
+  const subs = d.bySubcontractor;
+  root.innerHTML =
+    pageHead('Unassigned payments', 'Subcontractor payments no agreement accounts for — no bill recovers them until attached',
+      `<button class="btn" id="unExport">Export CSV</button> <button class="btn" id="backSubs">Back to register</button>`) +
+    `<div class="stat-grid" style="margin-bottom:16px">
+       ${statTile('Not on any agreement', cash(t.amount), t.count + ' payment(s)')}
+       ${statTile('Subcontractors', String(t.subcontractors), 'with such payments')}
+       ${statTile('Can be attached now', String(t.attachable), 'an approved agreement exists')}
+       ${statTile('Oldest', t.oldestDays + ' days', 'since paid')}
+     </div>
+     <div class="card" style="margin-bottom:16px"><div class="card-head"><h3>By subcontractor</h3></div><div id="unBySub"></div></div>
+     <div class="card">
+       <div class="card-head"><h3>Payments</h3>
+         <div class="filters">
+           <select class="input" id="unProject"><option value="">All projects</option>${projects.map(([id, n]) =>
+             `<option value="${UI.esc(id)}">${UI.esc(n)}</option>`).join('')}</select>
+           <select class="input" id="unSub"><option value="">All subcontractors</option>${subs.map(s0 =>
+             `<option value="${UI.esc(s0.SubcontractorID)}">${UI.esc(s0.CompanyName)}</option>`).join('')}</select>
+         </div></div>
+       <div id="unTable"></div>
+     </div>`;
+  document.getElementById('backSubs').onclick = () => navigate('subcontractors');
+  UI.table(document.getElementById('unBySub'), {
+    columns: [
+      { key: 'CompanyName', label: 'Subcontractor', render: r => `<a href="#" class="link" data-sub="${UI.esc(r.SubcontractorID)}">${UI.esc(r.CompanyName)}</a>` },
+      { key: 'Count', label: 'Payments', align: 'right' },
+      { key: 'Amount', label: 'Amount', align: 'right', render: r => `<strong>${cash(r.Amount)}</strong>` }
+    ],
+    rows: subs, empty: UI.emptyState('Nothing unassigned', 'Every payment to a subcontractor is on an agreement.')
+  });
+  const shown = () => d.rows.filter(r => (!unassignedState.project || r.ProjectID === unassignedState.project) &&
+    (!unassignedState.sub || r.SubcontractorID === unassignedState.sub));
+  const draw = () => {
+    UI.table(document.getElementById('unTable'), {
+      columns: [
+        { key: 'PaymentDate', label: 'Date', width: '100px', render: r => UI.fmt.date(r.PaymentDate) +
+            (r.AgeDays !== null ? `<br><span class="muted" style="font-size:11.5px">${r.AgeDays} days</span>` : '') },
+        { key: 'SubPaymentID', label: 'Payment', render: r => `<span class="mono">${UI.esc(r.SubPaymentID)}</span><br>
+            <span class="muted" style="font-size:11.5px">${UI.esc(r.PaymentType)}</span>` },
+        { key: 'CompanyName', label: 'Subcontractor', render: r => `<a href="#" class="link" data-sub="${UI.esc(r.SubcontractorID)}">${UI.esc(r.CompanyName)}</a>` },
+        { key: 'ProjectName', label: 'Project', render: r => UI.esc(r.ProjectCode || r.ProjectName || '—') },
+        { key: 'Amount', label: 'Amount', align: 'right', render: r => `<strong>${cash(r.Amount)}</strong>` },
+        { key: 'PaidFrom', label: 'Paid', render: r => UI.esc([r.PaidFrom, r.Method, r.BankAccount, r.Reference].filter(Boolean).join(' · ')) +
+            (r.CreatedByName ? `<br><span class="muted" style="font-size:11.5px">by ${UI.esc(r.CreatedByName)}</span>` : '') },
+        { key: 'Remarks', label: 'Remarks', render: r => UI.esc(r.Remarks || '') },
+        { key: 'x', label: 'Agreement', align: 'right', render: r => r.CanAttach
+            ? `<button class="btn btn-sm btn-primary" data-attach="${UI.esc(r.SubPaymentID)}">Attach</button>`
+            : `<span class="muted" style="font-size:12px">${r.Agreements.length ? '' : 'no approved agreement on this project'}</span>` }
+      ],
+      rows: shown(), empty: UI.emptyState('Nothing here', 'No unassigned payment matches the filters.')
+    });
+    root.querySelectorAll('[data-attach]').forEach(b => { b.onclick = () => {
+      const r = d.rows.find(x => x.SubPaymentID === b.dataset.attach);
+      const f = [{ name: 'AgreementID', label: 'Recover through', type: 'select', required: true, span: 2,
+        options: r.Agreements.map(a => ({ value: a.AgreementID, label: a.AgreementNumber + (a.Scope ? ' — ' + a.Scope : '') +
+          (a.Status !== 'Active' ? ' (' + a.Status + ')' : '') })) }];
+      const body = UI.el('div');
+      body.appendChild(UI.el('p', { class: 'muted', text: r.SubPaymentID + ': ' + cash(r.Amount) + ' paid ' + UI.fmt.date(r.PaymentDate) +
+        ' to ' + r.CompanyName + ' on ' + (r.ProjectName || r.ProjectID) + '. Once attached it is recovered from that agreement’s bills.' }));
+      const form = UI.form(f, {});
+      body.appendChild(form);
+      UI.modal({ title: 'Attach ' + r.SubPaymentID + ' to an agreement', body, footer: [
+        { label: 'Cancel', onClick: m => m.close() },
+        { label: 'Attach', class: 'btn-primary', onClick: async m => {
+            const v = UI.validate(form, f); if (!v) return;
+            m.busy(true);
+            try { UI.success((await api('tagSubcontractorAdvance', r.SubPaymentID, v.AgreementID)).message); m.close(); navigate('unassigned-payments'); }
+            catch (e) { m.busy(false); UI.error('Not attached', e.message); }
+          } }
+      ] });
+    }; });
+    root.querySelectorAll('[data-sub]').forEach(a => { a.onclick = e => { e.preventDefault(); navigate('subcontractor', a.dataset.sub); }; });
+  };
+  const pj = document.getElementById('unProject'), sb = document.getElementById('unSub');
+  pj.value = unassignedState.project; sb.value = unassignedState.sub;
+  pj.onchange = () => { unassignedState.project = pj.value; draw(); };
+  sb.onchange = () => { unassignedState.sub = sb.value; draw(); };
+  draw();
+  document.getElementById('unExport').onclick = () => {
+    const q = v => '"' + String(v === null || v === undefined ? '' : v).replace(/"/g, '""') + '"';
+    const head = ['Date', 'Payment', 'Type', 'Subcontractor', 'Project', 'Amount', 'Paid from', 'Method', 'Bank account',
+                  'Reference', 'Recorded by', 'Days', 'Remarks', 'Agreements it could go to'];
+    const lines = shown().map(r => [r.PaymentDate, r.SubPaymentID, r.PaymentType, r.CompanyName, r.ProjectCode || r.ProjectName,
+      r.Amount, r.PaidFrom, r.Method, r.BankAccount, r.Reference, r.CreatedByName, r.AgeDays, r.Remarks,
+      r.Agreements.map(a => a.AgreementNumber).join(' ')].map(q).join(','));
+    downloadCsv('Unassigned subcontractor payments.csv', [head.map(q).join(',')].concat(lines).join('\r\n'));
+  };
+}
+PAGES['unassigned-payments'] = pageUnassignedPayments;
+ROUTE_PARENTS['unassigned-payments'] = 'subcontractors';
 
 /* ------------------------------------------------------- REGISTRATION */
 
@@ -18802,7 +18911,7 @@ PAGES['notifications'] = pageNotifications;
     agreements: 'subcontractors',
     agreement: 'subcontractors',
     subbill: 'subcontractors',
-    payables: 'subcontractors',
+    payables: 'subcontractors', 'unassigned-payments': 'subcontractors',
     'cash-account': 'cash',
     'cash-reports': 'cash',
     'cash-report': 'cash',
