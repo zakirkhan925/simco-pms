@@ -2825,11 +2825,24 @@ async function pageUsers(root) {
   await loadUsers();
 }
 
+/** Project names by ID, read once per page load (owner, 17 Nov 2026: names, not numbers, on the users list). */
+let projectNamesCache = null;
+async function projectNames() {
+  if (!projectNamesCache) {
+    projectNamesCache = api('listProjects', { pageSize: 500 })
+      .then(r => new Map(r.data.rows.map(p => [String(p.ProjectID), p])))
+      .catch(() => { projectNamesCache = null; return new Map(); });
+  }
+  return projectNamesCache;
+}
+const projectLabels = (ids, names) => ids.map(id => (names.get(String(id)) || {}).ProjectName || id);
+
 async function loadUsers() {
   const mount = document.getElementById('userTable');
   if (!mount) return;
   mount.innerHTML = UI.loadingState();
   try {
+    const names = await projectNames();
     const res = await api('listUsers', {
       page: userState.page, pageSize: userState.pageSize, search: userState.search,
       role: userState.role, status: userState.status, sortBy: userState.sortBy, sortDir: userState.sortDir
@@ -2851,7 +2864,9 @@ async function loadUsers() {
         { key: 'Role', label: 'Role', render: r => UI.badge(r.Role.replace(/_/g, ' '), 'blue') },
         { key: 'Department', label: 'Department' },
         { key: 'AssignedProjects', label: 'Projects', sortable: false,
-          render: r => r.AssignedProjects.length ? UI.esc(r.AssignedProjects.join(', ')) : '<span class="muted">All / none</span>' },
+          render: r => r.AssignedProjects.length
+            ? `<span title="${UI.esc(r.AssignedProjects.join(', '))}">${projectLabels(r.AssignedProjects, names).map(UI.esc).join('<br>')}</span>`
+            : '<span class="muted">All / none</span>' },
         { key: 'Status', label: 'Status', render: r =>
           UI.badge(r.Status) + (r.IsLocked ? ' ' + UI.badge('Locked', 'red') : '') },
         { key: 'LastLogin', label: 'Last login', render: r => UI.fmt.dateTime(r.LastLogin) },
@@ -2904,17 +2919,53 @@ function userFields(existing) {
   ];
 }
 
-function openUserForm(existing) {
+async function openUserForm(existing) {
   const fields = userFields(existing);
-  const body = UI.form(fields, existing || { Status: 'Active' });
+  const formEl = UI.form(fields, existing || { Status: 'Active' });
+  // The projects this person handles, ticked from a list (owner, 17 Nov 2026).
+  const names = await projectNames();
+  const mine = new Set(((existing && existing.AssignedProjects) || []).map(String));
+  const projects = [...names.values()].filter(p => String(p.Status) !== 'Closed' || mine.has(String(p.ProjectID)))
+    .sort((a, b) => String(a.ProjectName).localeCompare(String(b.ProjectName)));
+  const body = UI.el('div');
+  body.appendChild(formEl);
+  const pick = UI.el('div', { style: 'margin-top:14px' });
+  pick.innerHTML = `
+    <div class="flex gap-8" style="align-items:center;justify-content:space-between;margin-bottom:6px">
+      <strong style="font-size:13px">Projects this user handles</strong>
+      <span class="flex gap-8"><input class="input" id="upSearch" placeholder="Search projects" style="width:180px">
+        <button type="button" class="btn btn-sm" id="upNone">Clear</button></span>
+    </div>
+    <div id="upList" style="max-height:220px;overflow:auto;border:1px solid var(--border, #ddd);border-radius:6px;padding:6px 10px">
+      ${projects.map(p => `<label class="up-row" style="display:flex;gap:8px;align-items:center;padding:3px 0;font-size:13px">
+        <input type="checkbox" value="${UI.esc(p.ProjectID)}"${mine.has(String(p.ProjectID)) ? ' checked' : ''}>
+        <span>${UI.esc(p.ProjectName)} <span class="muted">${UI.esc(p.ProjectID)}${String(p.Status) !== 'Active' ? ' · ' + UI.esc(p.Status) : ''}</span></span>
+      </label>`).join('') || '<span class="muted">No projects</span>'}
+    </div>
+    <div class="muted" id="upCount" style="font-size:12px;margin-top:4px"></div>
+    <div class="muted" style="font-size:12px;margin-top:2px">An administrator or management role sees every project
+      whatever is ticked; everyone else sees only the projects ticked here.</div>`;
+  body.appendChild(pick);
+  const count = () => {
+    const n = pick.querySelectorAll('#upList input:checked').length;
+    pick.querySelector('#upCount').textContent = n ? n + ' project' + (n === 1 ? '' : 's') + ' ticked' : 'No project ticked';
+  };
+  pick.querySelectorAll('#upList input').forEach(c => { c.onchange = count; });
+  pick.querySelector('#upNone').onclick = () => { pick.querySelectorAll('#upList input').forEach(c => { c.checked = false; }); count(); };
+  pick.querySelector('#upSearch').oninput = e => {
+    const q = String(e.target.value || '').toLowerCase();
+    pick.querySelectorAll('.up-row').forEach(r => { r.style.display = r.textContent.toLowerCase().indexOf(q) === -1 ? 'none' : 'flex'; });
+  };
+  count();
   UI.modal({
     title: existing ? 'Edit user' : 'Add user',
     body,
     footer: [
       { label: 'Cancel', onClick: m => m.close() },
       { label: existing ? 'Save changes' : 'Create user', class: 'btn-primary', onClick: async m => {
-        const data = UI.validate(body, fields);
+        const data = UI.validate(formEl, fields);
         if (!data) return;
+        data.AssignedProjects = [...pick.querySelectorAll('#upList input:checked')].map(c => c.value);
         m.busy(true);
         try {
           if (existing) {
@@ -3594,6 +3645,7 @@ async function pageDatabase(root) {
 async function pageProfile(root) {
   const res = await api('getMyProfile');
   const u = res.data.user;
+  const pnames = await projectNames();
   const fields = [
     { name: 'Name', label: 'Full name', required: true },
     { name: 'Phone', label: 'Phone' },
@@ -3612,7 +3664,7 @@ async function pageProfile(root) {
              <dt>Email</dt><dd>${UI.esc(u.Email)}</dd>
              <dt>Role</dt><dd>${UI.badge(u.Role.replace(/_/g, ' '), 'blue')}</dd>
              <dt>Status</dt><dd>${UI.badge(u.Status)}</dd>
-             <dt>Projects</dt><dd>${u.AssignedProjects.length ? UI.esc(u.AssignedProjects.join(', ')) : 'All / none'}</dd>
+             <dt>Projects</dt><dd>${u.AssignedProjects.length ? projectLabels(u.AssignedProjects, pnames).map(UI.esc).join('<br>') : 'All / none'}</dd>
              <dt>Last login</dt><dd>${UI.fmt.dateTime(u.LastLogin)}</dd>
            </dl>
            <button class="btn btn-block mt-16" id="profChangePw">Change password</button>
@@ -14302,10 +14354,14 @@ async function cashAccountForm() {
   const users = (await api('listUsers', { pageSize: 200 })).data.rows
     .filter(u => String(u.Status) === 'Active');
   const fields = [
+    // Chosen, never taken from the top of the list (owner, 17 Nov 2026: a NUST float landed on AMF).
     { name: 'ProjectID', label: 'Project', type: 'select', required: true,
-      options: projects.map(p => ({ value: p.ProjectID, label: p.ProjectID + ' — ' + p.ProjectName })) },
+      options: [{ value: '', label: '— choose the project —' }]
+        .concat(projects.map(p => ({ value: p.ProjectID, label: p.ProjectName + ' (' + p.ProjectID + ')' }))),
+      hint: 'Its own project. It may also pay for the other projects its holder is assigned to.' },
     { name: 'CustodianUserID', label: 'Held by', type: 'select', required: true,
-      options: users.map(u => ({ value: u.UserID, label: u.Name + ' (' + u.Role + ')' })),
+      options: [{ value: '', label: '— choose who holds it —' }]
+        .concat(users.map(u => ({ value: u.UserID, label: u.Name + ' (' + u.Role + ')' }))),
       hint: 'Usually the site accountant' },
     { name: 'Name', label: 'Name this float', span: 2, hint: 'Left blank, the custodian and project are used' },
     { name: 'FloatLimit', label: 'Ceiling', type: 'number',
@@ -14315,7 +14371,7 @@ async function cashAccountForm() {
     { name: 'Remarks', label: 'Remarks', type: 'textarea', span: 2 }
   ];
   const body = UI.el('div');
-  const form = UI.form(fields, { FloatLimit: App.settings['cash.defaultFloatLimit'] || '' });
+  const form = UI.form(fields, { ProjectID: '', CustodianUserID: '', FloatLimit: App.settings['cash.defaultFloatLimit'] || '' });
   body.appendChild(form);
   UI.modal({
     title: 'Open a working cash float', body,
@@ -14341,19 +14397,26 @@ async function cashAccountForm() {
  * is fixed; a change of holder is a hand-over, refused by the server while a
  * period report is open.
  */
-async function cashAccountEditDialog(a) {
+async function cashAccountEditDialog(a, canMove) {
   const users = (await api('listUsers', { pageSize: 200 })).data.rows
     .filter(u => String(u.Status) === 'Active' || u.UserID === a.CustodianUserID);
-  const fields = [
+  // Its project may change only while nothing has gone through it (17 Nov 2026).
+  const projects = canMove ? (await api('listProjects', { pageSize: 200 })).data.rows
+    .filter(p => String(p.Status) !== 'Closed' || p.ProjectID === a.ProjectID) : [];
+  const fields = (canMove ? [
+    { name: 'ProjectID', label: 'Project', type: 'select', required: true, span: 2,
+      options: projects.map(p => ({ value: p.ProjectID, label: p.ProjectName + ' (' + p.ProjectID + ')' })),
+      hint: 'Can be changed only while nothing has been issued, spent or reported on this float' }
+  ] : []).concat([
     { name: 'Name', label: 'Name', required: true, span: 2 },
     { name: 'CustodianUserID', label: 'Held by', type: 'select', required: true,
       options: users.map(u => ({ value: u.UserID, label: u.Name + ' (' + u.Role + ')' })),
       hint: 'Changing this hands the float, and the cash in it, to that person' },
     { name: 'FloatLimit', label: 'Ceiling', type: 'number', hint: 'The most the float may hold. 0 for no ceiling' },
     { name: 'Remarks', label: 'Remarks', type: 'textarea', span: 2 }
-  ];
+  ]);
   const body = UI.el('div');
-  const form = UI.form(fields, { Name: a.Name, CustodianUserID: a.CustodianUserID,
+  const form = UI.form(fields, { ProjectID: a.ProjectID, Name: a.Name, CustodianUserID: a.CustodianUserID,
                                  FloatLimit: a.FloatLimit, Remarks: a.Remarks || '' });
   body.appendChild(form);
   UI.modal({
@@ -14496,7 +14559,7 @@ async function pageCashAccount(root, accountId) {
 
   const on = (id, fn) => { const b = document.getElementById(id); if (b) b.onclick = fn; };
   on('cashBack', () => navigate('cash'));
-  on('cashEditBtn', () => cashAccountEditDialog(a));
+  on('cashEditBtn', () => cashAccountEditDialog(a, !!d.canMoveProject));
   on('cashIssueBtn', () => cashIssueDialog(accountId, p));
   on('cashSpendBtn', () => cashSpendDialog(accountId, d));
   on('cashTransferBtn', () => cashTransferDialog(accountId, d.balance));
