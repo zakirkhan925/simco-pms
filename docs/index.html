@@ -15342,6 +15342,8 @@ async function payrollSheetPage(root, K, id) {
     acts.push(`<button class="btn" id="psPayBank">${'unpaidAll' in d ? 'Pay from bank' : 'Record bank payment'}</button>`);
   }
   if (d.canPay && d.unpaidCash > 0) acts.push(`<button class="btn btn-primary" id="psPayCash">Pay cash from float</button>`);
+  // An administrator reopens an approved, unpaid sheet to be corrected (17 Nov 2026).
+  if (d.canReopen) acts.push(`<button class="btn" id="psReopen">Reopen</button>`);
 
   root.innerHTML = pageHead(id, `${K.noun} · ${s.MonthLabel} · ${s.ProjectName}`, acts.join(' ')) +
     (s.Status === 'Returned' && s.ReturnReason ? `<div class="banner banner-warn"><div><strong>Returned:</strong>
@@ -15535,11 +15537,20 @@ async function payrollSheetPage(root, K, id) {
         onConfirm: () => go('') });
       return;
     }
-    const f = [{ name: 'Reason', label: 'Why is it going back?', type: 'textarea', required: true, span: 2 }];
+    const reopen = action === 'reopen';
+    const f = [{ name: 'Reason', label: reopen ? 'Why is the approved sheet being reopened?' : 'Why is it going back?',
+                 type: 'textarea', required: true, span: 2 }];
+    const body = UI.el('div');
+    if (reopen) {
+      body.appendChild(UI.el('p', { style: 'margin:0 0 12px', text: 'The sheet goes back to Returned, to be corrected, checked ' +
+        'and approved again. The advances it deducted are owed again until it is re-approved, and its cost leaves the budget ' +
+        'until then. Nothing on it has been paid.' }));
+    }
     const form = UI.form(f, {});
-    UI.modal({ title: 'Return ' + id, body: form, footer: [
+    body.appendChild(form);
+    UI.modal({ title: label + ' ' + id, body, footer: [
       { label: 'Cancel', onClick: m => m.close() },
-      { label: 'Return', class: 'btn-primary', onClick: async m => { const v = UI.validate(form, f); if (!v) return; m.close(); await go(v.Reason); } }
+      { label, class: reopen ? 'btn-danger' : 'btn-primary', onClick: async m => { const v = UI.validate(form, f); if (!v) return; m.close(); await go(v.Reason); } }
     ] });
   };
   on('psSubmit', act('submit', 'Submit'));
@@ -15547,6 +15558,7 @@ async function payrollSheetPage(root, K, id) {
   on('psApprove', act('approve', 'Approve'));
   on('psCancel', act('cancel', 'Cancel'));
   on('psReturn', act('return', 'Return', true));
+  on('psReopen', act('reopen', 'Reopen', true));
   on('psPayCash', () => payrollPayDialog(K, d, id, 'Cash'));
   on('psPayBank', () => payrollPayDialog(K, d, id, 'Bank'));
 }
