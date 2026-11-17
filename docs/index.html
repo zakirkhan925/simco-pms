@@ -13292,8 +13292,7 @@ function renderRateRevisions(host, d, back) {
       { key: 'Lines', label: 'Rates', render: r => (r.Lines || []).map(l =>
           `${UI.esc(l.Description)}: <span class="muted">${cash(l.OldRate)}</span> → <strong>${cash(l.NewRate)}</strong>` +
           (Number(l.BilledQty) ? ` <span class="muted" style="font-size:12px">(${lineQty(l.BilledQty)} ${UI.esc(l.Unit)} billed)</span>` : '')
-        ).join('<br>') + (r.AppliesLabel ? `<div class="muted" style="font-size:12px;margin-top:3px">Applies to
-          ${UI.esc(r.AppliesLabel)}</div>` : '') },
+        ).join('<br>') },
       { key: 'ValueAfter', label: 'Agreement value', align: 'right', render: r =>
           `<span class="muted">${cash(r.ValueBefore)}</span><br><strong>${cash(r.ValueAfter)}</strong>` },
       { key: 'Reason', label: 'Reason', render: r => UI.esc(r.Reason || '') },
@@ -13330,8 +13329,8 @@ function rateRevisionForm(agreementId, d, onDone) {
   const items = d.items || [];
   const body = UI.el('div');
   body.innerHTML =
-    `<p class="muted" style="margin:0 0 12px;font-size:13px">Enter a new rate only on the lines that change, and choose below
-       what the new rates apply to. Nothing changes until Management approves it.</p>
+    `<p class="muted" style="margin:0 0 12px;font-size:13px">Enter a new rate only on the lines that change. Nothing changes
+       until an approver approves it. Work already billed at the old rate is then settled on the next bill.</p>
      <div class="table-wrap"><table class="lines">
        <thead><tr><th>Line</th><th style="width:56px">UOM</th><th class="num">Quantity</th><th class="num">Billed</th>
          <th class="num">Rate now</th><th class="num" style="width:120px">New rate</th></tr></thead>
@@ -13342,51 +13341,34 @@ function rateRevisionForm(agreementId, d, onDone) {
          <td><input class="input" type="number" step="any" min="0" data-new placeholder="${UI.esc(i.Rate)}"></td></tr>`).join('')}
        </tbody></table></div>
      <div id="revPreview" class="muted" style="margin:10px 0;font-size:13px"></div>`;
-  // What the new rates apply to (owner, 17 Nov 2026), on a server that knows.
-  const scoped = 'revisionStartBills' in d;
-  const formFields = (scoped ? [{ name: 'AppliesFrom', label: 'The new rates apply to', type: 'select', required: true, span: 2,
-      options: [{ value: 'NOW', label: 'Only the quantity still to do — work already billed stays at the old rate' },
-                { value: 'START', label: 'Everything, from the beginning — the difference on work billed goes on the next bill' }]
-        .concat((d.revisionStartBills || []).map(b => ({ value: b.SubBillID,
-          label: 'From bill ' + b.SubBillID + ' (to ' + UI.fmt.date(b.PeriodTo) + ') onward — earlier bills stay at the old rate' }))) }] : [])
-    .concat([{ name: 'Reason', label: 'Why are the rates being revised?', type: 'textarea', required: true, span: 2 }]);
-  const form = UI.form(formFields, { AppliesFrom: 'NOW' });
+  const form = UI.form([{ name: 'Reason', label: 'Why are the rates being revised?', type: 'textarea', required: true, span: 2 }], {});
   body.appendChild(form);
   const read = () => items.map(i => ({ i, v: body.querySelector(`tr[data-id="${i.AgreementItemID}"] [data-new]`).value }))
     .filter(x => x.v !== '' && Number(x.v) !== Number(x.i.Rate));
   const preview = () => {
     const changed = read();
-    const applies = scoped ? (UI.readForm(form).AppliesFrom || 'NOW') : 'START';
-    // From now: only the quantity still to do moves. From the beginning: every unit. From a bill: worked out when sent.
-    const after = applies === 'NOW'
-      ? Number(d.agreement.ContractValue) + changed.reduce((t, x) =>
-          t + (Number(x.i.Quantity) - Number(x.i.PreviousQty || 0)) * (Number(x.v) - Number(x.i.Rate)), 0)
-      : applies === 'START'
-      ? items.reduce((t, i) => { const c = changed.find(x => x.i === i);
-          return t + (c ? Number(i.Quantity) * Number(c.v) : Number(i.Amount)); }, 0)
-      : null;
-    body.querySelector('#revPreview').innerHTML = !changed.length ? 'No line changed yet.'
-      : `${changed.length} line(s) change. ` + (after === null
-        ? 'The new agreement value is worked out when it is sent.'
-        : `Agreement value ${cash(d.agreement.ContractValue)} → <strong>${cash(after)}</strong>.`);
+    const after = items.reduce((t, i) => {
+      const c = changed.find(x => x.i === i);
+      return t + Number(i.Quantity) * (c ? Number(c.v) : Number(i.Rate));
+    }, 0);
+    body.querySelector('#revPreview').innerHTML = changed.length
+      ? `${changed.length} line(s) change. Agreement value ${cash(d.agreement.ContractValue)} → <strong>${cash(after)}</strong>.`
+      : 'No line changed yet.';
   };
   body.querySelectorAll('[data-new]').forEach(x => { x.oninput = preview; });
-  const af = form.querySelector('[name="AppliesFrom"]');
-  if (af) af.onchange = preview;
   preview();
   UI.modal({
     title: 'Revise rates — ' + agreementId, size: 'xwide', body,
     footer: [
       { label: 'Cancel', onClick: m => m.close() },
       { label: 'Send for approval', class: 'btn-primary', onClick: async m => {
-          const data = UI.validate(form, formFields);
+          const data = UI.validate(form, [{ name: 'Reason', label: 'Reason', required: true }]);
           if (!data) return;
           const lines = read().map(x => ({ AgreementItemID: x.i.AgreementItemID, NewRate: x.v }));
           if (!lines.length) { UI.warn('Enter a new rate on at least one line.'); return; }
           m.busy(true);
           try {
-            const res = await api('requestRateRevision', agreementId,
-              Object.assign({ Reason: data.Reason, lines }, scoped ? { AppliesFrom: data.AppliesFrom } : { AppliesFrom: 'START' }));
+            const res = await api('requestRateRevision', agreementId, { Reason: data.Reason, lines });
             UI.success(res.message); m.close(); if (onDone) onDone();
           } catch (e) { m.busy(false); UI.error('Not sent', e.message); }
         } }
