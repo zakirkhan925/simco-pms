@@ -13611,15 +13611,10 @@ async function subBillForm(agreementId, agreementData, onSaved, existing) {
   if (editing) {
     (existing.items || []).forEach(i => { mine[String(i.AgreementItemID)] = Number(i.CurrentQty) || 0; });
   }
-  const allItems = (agreementData.items || []).map(i => {
-    const own = mine[String(i.AgreementItemID)] || 0;
-    if (!own) return i;
-    return Object.assign({}, i, {
-      PreviousQty: Number(i.PreviousQty) - own,
-      BalanceQty: Number(i.BalanceQty) + own,
-      PreviousAmount: Number(i.PreviousAmount || 0) - own * Number(i.Rate || 0)
-    });
-  });
+  // A bill being corrected is Draft or Returned, so the agreement's figures already leave it out:
+  // its own quantity is not taken off Previous again (18 Nov 2026: SBL-000064 showed Previous 3,418.63
+  // for 43,252, and -0.85 for 0).
+  const allItems = agreementData.items || [];
   const measured = allItems.filter(i => Number(i.BalanceQty) > 0 || Number(i.PreviousQty) > 0 || Number(i.HeldAmount) > 0);
   const isMeasured = allItems.length > 0;
   // Approved recovery notes still to come off (12 Nov 2026); a bill being corrected gets its own back.
@@ -13699,7 +13694,7 @@ async function subBillForm(agreementId, agreementData, onSaved, existing) {
                <td>${UI.esc(i.Unit)}</td>
                <td class="num">${lineQty(i.Quantity)}</td>
                <td class="num">${lineQty(i.PreviousQty)}</td>
-               <td><input class="input" type="number" step="any" min="0" max="${i.BalanceQty}"
+               <td><input class="input" type="number" step="any" min="${-Number(i.PreviousQty || 0)}" max="${i.BalanceQty}"
                           data-qty value="${mine[String(i.AgreementItemID)] || ''}" placeholder="0"
                           title="${lineQty(i.BalanceQty)} ${UI.esc(i.Unit)} still to do"></td>
                <td class="num" data-cum>${lineQty(i.PreviousQty)}</td>
@@ -13750,7 +13745,7 @@ async function subBillForm(agreementId, agreementData, onSaved, existing) {
     if (rt) r.Rate = rt.value;
     if (st) { r.StageQty = st.querySelector('[data-sqty]').value; r.StageRate = st.querySelector('[data-srate]').value; }
     return r;
-  }).filter(r => Number(r.CurrentQty) > 0 || Number(r.StageQty) > 0);
+  }).filter(r => Number(r.CurrentQty) !== 0 || Number(r.StageQty) > 0);
 
   const recalc = () => {
     const v = UI.readForm(form);
@@ -13770,9 +13765,13 @@ async function subBillForm(agreementId, agreementData, onSaved, existing) {
         if (qty > Number(i.BalanceQty)) {
           warn.push(i.Description + ': only ' + lineQty(i.BalanceQty) + ' ' + i.Unit + ' left to bill');
         }
+        // A negative quantity takes back work billed before (18 Nov 2026), never more than was billed.
+        if (qty < 0 && -qty > Number(i.PreviousQty || 0)) {
+          warn.push(i.Description + ': only ' + lineQty(i.PreviousQty) + ' ' + i.Unit + ' has been billed to take back');
+        }
         if (rt && rate > Number(i.Rate) + 0.00005) {
           warn.push(i.Description + ': the rate cannot be above the agreement rate of ' + cash(i.Rate));
-        } else if (rt && qty && rate < Number(i.Rate)) {
+        } else if (rt && qty > 0 && rate < Number(i.Rate)) {
           warn.push(i.Description + ': billed at ' + cash(rate) + ' of ' + cash(i.Rate) + '; ' + cash(Number(i.Rate) - rate) +
             ' per ' + i.Unit + ' stays to bill on a later bill');
         }
