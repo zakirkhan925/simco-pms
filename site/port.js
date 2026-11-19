@@ -65,7 +65,7 @@
     agreements: 'subcontractors',
     agreement: 'subcontractors',
     subbill: 'subcontractors',
-    payables: 'subcontractors',
+    payables: 'subcontractors', 'unassigned-payments': 'subcontractors',
     'cash-account': 'cash',
     'cash-reports': 'cash',
     'cash-report': 'cash',
