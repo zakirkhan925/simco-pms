@@ -8220,9 +8220,9 @@ function openPoFromRfqForm(d) {
     { name: 'DeliveryLocation', label: 'Deliver to', required: true,
       value: d.project ? d.project.ProjectName : '' },
     { name: 'PaymentTerms', label: 'Payment terms' },
-    { name: 'DiscountPercent', label: 'Discount %', type: 'number', value: 0 },
-    { name: 'Deduction', label: 'Less: deduction (Rs)', type: 'number', value: 0,
-      hint: 'A fixed amount off the order. Use this or Discount %, not both.' },
+    { name: 'DiscountPercent', label: 'Discount % (all lines)', type: 'number', value: 0 },
+    { name: 'Deduction', label: 'Or discount in Rs (shared over the lines)', type: 'number', value: 0,
+      hint: 'Goes onto every line, so receipts and invoices carry it. Use one, not both.' },
     { name: 'TaxPercent', label: 'Tax %', type: 'number',
       value: App.settings.defaultTaxPercent === undefined ? 0 : App.settings.defaultTaxPercent },
     { name: 'Remarks', label: 'Remarks', type: 'textarea', span: 2 }
@@ -8410,7 +8410,7 @@ async function pagePurchaseOrderDetail(root, poId) {
       ${statTile('Status', po.Status, 'Raised ' + UI.fmt.date(po.PODate))}
       ${statTile('Order value', money(po.Total), po.TaxPercent ? 'Including ' + po.TaxPercent + '% tax' : 'No tax applied')}
       ${statTile('Delivery', UI.fmt.date(po.DeliveryDate), po.IsOverdue ? 'Overdue' : UI.esc(po.DeliveryLocation))}
-      ${statTile('Received', money(d.receivedValue), 'Against ' + money(po.Subtotal))}
+      ${statTile('Received', money(d.receivedValue), 'Against ' + money(po.Subtotal - (po.DiscountAmount || 0)))}
     </div>
     <div class="card"><div class="card-head"><div class="card-title">Lines</div></div>
       <div id="poItems"></div></div>
@@ -8434,9 +8434,16 @@ async function pagePurchaseOrderDetail(root, poId) {
         `${UI.fmt.number(i.OrderedQty, 3)} ${UI.esc(i.Unit)}` },
       { key: 'ReceivedQty', label: 'Received', align: 'right', render: i =>
         i.ReceivedQty ? UI.fmt.number(i.ReceivedQty, 3) : '<span class="muted">—</span>' },
-      { key: 'Rate', label: 'Rate', align: 'right', render: i => UI.fmt.number(i.Rate) },
+      { key: 'Rate', label: 'Rate', align: 'right', render: i => UI.fmt.number(i.Rate) }
+    ].concat(d.items.some(i => i.DiscountAmount) ? [
+      // Line discounts (19 Nov 2026): receipts value each line at its net rate.
+      { key: 'DiscountAmount', label: 'Discount', align: 'right', render: i => i.DiscountAmount
+        ? (i.DiscountPercent ? UI.esc(i.DiscountPercent) + '% · ' : '') + UI.fmt.number(i.DiscountAmount)
+        : '<span class="muted">—</span>' },
+      { key: 'NetRate', label: 'Net rate', align: 'right', render: i => UI.fmt.number(i.NetRate) }
+    ] : []).concat([
       { key: 'Amount', label: 'Amount', align: 'right', render: i => UI.fmt.number(i.Amount) }
-    ],
+    ]),
     rows: d.items,
     empty: UI.emptyState('No lines', 'This order has nothing on it.')
   });
@@ -8445,9 +8452,8 @@ async function pagePurchaseOrderDetail(root, poId) {
   itemsMount.insertAdjacentHTML('beforeend',
     `<div class="totals-strip">
       <div><span>Subtotal</span><strong>${money(po.Subtotal)}</strong></div>
-      ${po.DiscountPercent ? `<div><span>Discount ${UI.esc(po.DiscountPercent)}%</span>
+      ${po.DiscountAmount ? `<div><span>Discount${po.DiscountPercent ? ' ' + UI.esc(po.DiscountPercent) + '%' : ''}</span>
         <strong>− ${money(po.DiscountAmount)}</strong></div>` : ''}
-      ${po.Deduction ? `<div><span>Less: deduction</span><strong>− ${money(po.Deduction)}</strong></div>` : ''}
       ${po.TaxPercent ? `<div><span>Tax ${UI.esc(po.TaxPercent)}%</span>
         <strong>${money(po.TaxAmount)}</strong></div>` : ''}
       <div class="grand"><span>Total</span><strong>${money(po.Total)}</strong></div>
@@ -8634,9 +8640,6 @@ function buildPoForm(existing, projects, vendors) {
     { name: 'DeliveryDate', label: 'Delivery required by', type: 'date', required: true },
     { name: 'DeliveryLocation', label: 'Deliver to', required: true },
     { name: 'PaymentTerms', label: 'Payment terms' },
-    { name: 'DiscountPercent', label: 'Discount %', type: 'number', value: 0 },
-    { name: 'Deduction', label: 'Less: deduction (Rs)', type: 'number', value: 0,
-      hint: 'A fixed amount off the order. Use this or Discount %, not both.' },
     { name: 'TaxPercent', label: 'Tax %', type: 'number', value: 0 },
     { name: 'Remarks', label: 'Remarks', type: 'textarea', span: 2 }
   ].concat(revising ? [{ name: 'Reason', label: 'Reason for the change', type: 'textarea', span: 2,
@@ -8644,8 +8647,7 @@ function buildPoForm(existing, projects, vendors) {
   const values = existing ? {
     ProjectID: existing.po.ProjectID, VendorID: existing.po.VendorID,
     DeliveryDate: existing.po.DeliveryDate, DeliveryLocation: existing.po.DeliveryLocation,
-    PaymentTerms: existing.po.PaymentTerms, DiscountPercent: existing.po.DiscountPercent,
-    Deduction: existing.po.Deduction || 0,
+    PaymentTerms: existing.po.PaymentTerms,
     TaxPercent: existing.po.TaxPercent, Remarks: existing.po.Remarks
   } : {};
 
@@ -8663,36 +8665,73 @@ function buildPoForm(existing, projects, vendors) {
   itemsWrap.innerHTML = `<div class="card-head"><div class="card-title">Lines</div>
     ${fromRfq ? '<span class="muted">Rates and items come from the awarded quotation; quantities can change</span>'
               : '<button class="btn btn-sm" id="addPoItem">+ Add line</button>'}</div>
+    <div class="flex gap-8" style="align-items:flex-end;flex-wrap:wrap;padding:8px 12px">
+      <div class="field" style="margin:0"><label for="poDiscAll">Discount for all lines</label>
+        <input class="input" type="number" step="any" min="0" id="poDiscAll" style="width:110px;text-align:right"></div>
+      <div class="field" style="margin:0"><label for="poDiscKind">&nbsp;</label>
+        <select class="input" id="poDiscKind"><option value="pct">%</option><option value="rs">Rs (shared by value)</option></select></div>
+      <button class="btn btn-sm" id="poDiscApply" type="button">Apply to all lines</button>
+      <span class="muted" style="font-size:12px">Or type a discount on each line. Receipts and invoices take each line's net rate.</span>
+    </div>
     <div class="table-wrap"><table class="data" id="poItemTable">
-      <thead><tr><th style="width:80px">Code</th><th style="min-width:220px">Item</th><th style="width:85px">Unit</th>
+      <thead><tr><th style="width:80px">Code</th><th style="min-width:200px">Item</th><th style="width:85px">Unit</th>
         <th style="width:85px">Cost code</th><th class="num" style="width:80px">Qty</th>
-        <th class="num" style="width:95px">Rate</th><th class="num" style="width:100px">Amount</th>
+        <th class="num" style="width:95px">Rate</th><th class="num" style="width:70px">Disc %</th>
+        <th class="num" style="width:90px">Disc Rs</th><th class="num" style="width:100px">Amount</th>
         <th style="width:32px"></th></tr></thead>
       <tbody></tbody>
-      <tfoot><tr><th colspan="6" class="num">Total</th>
+      <tfoot><tr><th colspan="8" class="num" id="poItemBreak">Total</th>
         <th class="num" id="poItemTotal">0</th><th></th></tr></tfoot></table></div>`;
   body.appendChild(itemsWrap);
 
   const tbody = itemsWrap.querySelector('tbody');
   const units = App.enums.UNITS || [];
 
+  const r2 = v => Math.round(v * 100) / 100;
+  // A line's discount is a % when one is typed (the Rs then follows it), else rupees.
   function recalc() {
-    let subtotal = 0;
+    let subtotal = 0, discount = 0;
     tbody.querySelectorAll('tr').forEach(tr => {
       const qty = Number(tr.querySelector('[data-f="OrderedQty"]').value) || 0;
       const rate = Number(tr.querySelector('[data-f="Rate"]').value) || 0;
-      const amount = qty * rate;
-      tr.querySelector('[data-amount]').textContent = UI.fmt.number(amount);
-      subtotal += amount;
+      const gross = r2(qty * rate);
+      const pctBox = tr.querySelector('[data-f="DiscountPercent"]'), rsBox = tr.querySelector('[data-f="DiscountAmount"]');
+      const pct = Number(pctBox.value) || 0;
+      if (pct) rsBox.value = r2(gross * pct / 100);
+      rsBox.readOnly = !!pct || rsBox.disabled;
+      const disc = pct ? r2(gross * pct / 100) : r2(Number(rsBox.value) || 0);
+      tr.querySelector('[data-amount]').textContent = UI.fmt.number(gross - disc);
+      subtotal += gross; discount += disc;
     });
-    const disc = Number(form.querySelector('[name="DiscountPercent"]').value) || 0;
     const tax = Number(form.querySelector('[name="TaxPercent"]').value) || 0;
-    const ded = Number(form.querySelector('[name="Deduction"]').value) || 0;
-    const taxable = subtotal - (disc ? subtotal * disc / 100 : ded);
-    itemsWrap.querySelector('#poItemTotal').textContent = money(taxable + taxable * tax / 100);
+    const taxable = r2(subtotal - discount);
+    itemsWrap.querySelector('#poItemBreak').textContent = discount
+      ? 'Subtotal ' + UI.fmt.number(subtotal) + ' − discount ' + UI.fmt.number(discount) + (tax ? ' + tax ' + tax + '%' : '') + ' = Total'
+      : 'Total';
+    itemsWrap.querySelector('#poItemTotal').textContent = money(taxable + r2(taxable * tax / 100));
   }
-  ['DiscountPercent', 'Deduction', 'TaxPercent'].forEach(n =>
-    form.querySelector('[name="' + n + '"]').addEventListener('input', recalc));
+  form.querySelector('[name="TaxPercent"]').addEventListener('input', recalc);
+
+  // One discount for the whole order, put on every line (owner's request, 19 Nov 2026):
+  // a % as it is; rupees shared by line value, the rounding on the largest line, as the server does.
+  itemsWrap.querySelector('#poDiscApply').onclick = () => {
+    const v = Number(itemsWrap.querySelector('#poDiscAll').value) || 0;
+    const kind = itemsWrap.querySelector('#poDiscKind').value;
+    const rows = [...tbody.querySelectorAll('tr')].filter(tr => !tr.querySelector('[data-f="DiscountPercent"]').disabled);
+    if (v < 0 || (kind === 'pct' && v > 100)) { UI.warn('Check the discount', 'A % is between 0 and 100; rupees cannot be negative.'); return; }
+    const gross = rows.map(tr => r2((Number(tr.querySelector('[data-f="OrderedQty"]').value) || 0) *
+      (Number(tr.querySelector('[data-f="Rate"]').value) || 0)));
+    const total = gross.reduce((a, g) => a + g, 0);
+    if (kind === 'rs' && v > total) { UI.warn('Check the discount', 'It is more than the value of the lines.'); return; }
+    const shares = gross.map(g => kind === 'rs' && total ? r2(v * g / total) : 0);
+    if (kind === 'rs' && total) { const big = gross.indexOf(Math.max(...gross)); shares[big] = r2(shares[big] + v - shares.reduce((a, x) => a + x, 0)); }
+    rows.forEach((tr, k) => {
+      tr.querySelector('[data-f="DiscountPercent"]').value = kind === 'pct' && v ? v : '';
+      tr.querySelector('[data-f="DiscountAmount"]').value = kind === 'rs' && shares[k] ? shares[k] : '';
+    });
+    recalc();
+    itemsWrap.dispatchEvent(new Event('input'));
+  };
 
   function addRow(v) {
     v = v || {};
@@ -8712,13 +8751,22 @@ function buildPoForm(existing, projects, vendors) {
        <td><input class="input" type="number" step="any" data-f="Rate"
             value="${v.Rate === undefined ? '' : v.Rate}" style="text-align:right">
             ${rateLocked.has(v.POItemID) ? '<div class="muted" style="font-size:11.5px;text-align:right">invoiced</div>' : ''}</td>
+       <td><input class="input" type="number" step="any" min="0" max="100" data-f="DiscountPercent"
+            value="${v.DiscountPercent ? v.DiscountPercent : ''}" style="text-align:right"></td>
+       <td><input class="input" type="number" step="any" min="0" data-f="DiscountAmount"
+            value="${v.DiscountAmount ? v.DiscountAmount : ''}" style="text-align:right"></td>
        <td class="num" data-amount>0</td>
        <td>${fromRfq || received ? '' : '<button class="btn btn-sm btn-ghost" data-remove>&times;</button>'}</td>`;
     tr.querySelectorAll('input').forEach(i => i.addEventListener('input', recalc));
     // An order from an RFQ keeps the quotation's items and rates; only the
     // quantity can change. A rate on an invoiced line is fixed.
-    if (fromRfq) tr.querySelectorAll('input:not([data-f="OrderedQty"]), select').forEach(i => { i.readOnly = true; i.disabled = true; });
-    if (rateLocked.has(v.POItemID)) { const r = tr.querySelector('[data-f="Rate"]'); r.readOnly = true; r.disabled = true; }
+    // A discount agreed with the vendor may still go on an RFQ order's lines.
+    if (fromRfq) tr.querySelectorAll('input:not([data-f="OrderedQty"]):not([data-f="DiscountPercent"]):not([data-f="DiscountAmount"]), select')
+      .forEach(i => { i.readOnly = true; i.disabled = true; });
+    if (rateLocked.has(v.POItemID)) {
+      tr.querySelectorAll('[data-f="Rate"], [data-f="DiscountPercent"], [data-f="DiscountAmount"]')
+        .forEach(r => { r.readOnly = true; r.disabled = true; });
+    }
     const rm = tr.querySelector('[data-remove]');
     if (rm) rm.onclick = () => {
       if (tbody.querySelectorAll('tr').length === 1) { UI.warn('An order needs at least one line'); return; }
@@ -8777,7 +8825,8 @@ function buildPoForm(existing, projects, vendors) {
         tbody.innerHTML = '';
         (saved.rows.length ? saved.rows : [{}]).forEach(r => addRow({
           ItemCode: r.ItemCode, ItemName: r.ItemName, Unit: r.Unit, CostCode: r.CostCode,
-          OrderedQty: r.OrderedQty === '' ? undefined : r.OrderedQty, Rate: r.Rate === '' ? undefined : r.Rate }));
+          OrderedQty: r.OrderedQty === '' ? undefined : r.OrderedQty, Rate: r.Rate === '' ? undefined : r.Rate,
+          DiscountPercent: r.DiscountPercent, DiscountAmount: r.DiscountAmount }));
         recalc();
         banner.remove();
       };
@@ -8798,7 +8847,7 @@ function buildPoForm(existing, projects, vendors) {
           tr.querySelectorAll('[data-f]').forEach(f => { row[f.dataset.f] = f.value.trim(); });
           if (!row.ItemName) bad = bad || ('Line ' + (i + 1) + ' needs an item name.');
           if (Number(row.OrderedQty) < 0) bad = bad || ('Line ' + (i + 1) + ': a quantity cannot be negative. ' +
-            'For a deduction, remove this line and use "Less: deduction (Rs)" above.');
+            'For a discount, remove this line and use "Discount for all lines" above.');
           if (!(Number(row.OrderedQty) > 0)) bad = bad || ('Line ' + (i + 1) + ' needs a quantity.');
           const min = Number(tr.querySelector('[data-f="OrderedQty"]').min || 0);
           if (min && Number(row.OrderedQty) < min) bad = bad || ('Line ' + (i + 1) + ': ' + min + ' has already been received.');
@@ -8839,13 +8888,16 @@ async function printPurchaseOrder(poId) {
 
   const sym = d.company.currencySymbol || 'Rs';
   const n = v => UI.fmt.number(v);
+  const anyDisc = d.items.some(i => i.DiscountAmount);
   const rows = d.items.map(i => `<tr>
     <td>${i.LineNo}</td>
     <td>${UI.esc(i.ItemName)}${i.ItemCode ? '<br><small>' + UI.esc(i.ItemCode) + '</small>' : ''}
       ${i.Specification ? '<br><small>' + UI.esc(i.Specification) + '</small>' : ''}</td>
     <td class="r">${n(i.OrderedQty)} ${UI.esc(i.Unit)}</td>
     <td class="r">${n(i.Rate)}</td>
+    ${anyDisc ? `<td class="r">${i.DiscountAmount ? (i.DiscountPercent ? i.DiscountPercent + '% ' : '') + n(i.DiscountAmount) : ''}</td>` : ''}
     <td class="r">${n(i.Amount)}</td></tr>`).join('');
+  const span = anyDisc ? 5 : 4;
 
   UI.print.send(UI.print.page({
     company: d.company,
@@ -8870,17 +8922,16 @@ async function printPurchaseOrder(poId) {
       </div>
       <table>
         <thead><tr><th style="width:36px">#</th><th>Description</th><th class="r">Quantity</th>
-          <th class="r">Rate (${UI.esc(sym)})</th><th class="r">Amount (${UI.esc(sym)})</th></tr></thead>
+          <th class="r">Rate (${UI.esc(sym)})</th>${anyDisc ? '<th class="r">Discount</th>' : ''}<th class="r">Amount (${UI.esc(sym)})</th></tr></thead>
         <tbody>${rows}</tbody>
         <tfoot>
-          <tr><td colspan="4" class="r">Subtotal</td><td class="r">${n(d.po.Subtotal)}</td></tr>
-          ${d.po.DiscountPercent ? `<tr><td colspan="4" class="r">Discount ${d.po.DiscountPercent}%</td>
-            <td class="r">\u2212 ${n(d.po.DiscountAmount)}</td></tr>` : ''}
-          ${d.po.Deduction ? `<tr><td colspan="4" class="r">Less: deduction</td>
-            <td class="r">\u2212 ${n(d.po.Deduction)}</td></tr>` : ''}
-          ${d.po.TaxPercent ? `<tr><td colspan="4" class="r">Tax ${d.po.TaxPercent}%</td>
+          ${anyDisc ? `<tr><td colspan="${span}" class="r">Gross</td><td class="r">${n(d.po.Subtotal)}</td></tr>
+            <tr><td colspan="${span}" class="r">Discount${d.po.DiscountPercent ? ' ' + d.po.DiscountPercent + '%' : ''}</td>
+            <td class="r">\u2212 ${n(d.po.DiscountAmount)}</td></tr>`
+            : `<tr><td colspan="${span}" class="r">Subtotal</td><td class="r">${n(d.po.Subtotal)}</td></tr>`}
+          ${d.po.TaxPercent ? `<tr><td colspan="${span}" class="r">Tax ${d.po.TaxPercent}%</td>
             <td class="r">${n(d.po.TaxAmount)}</td></tr>` : ''}
-          <tr><td colspan="4" class="r">Total (${UI.esc(sym)})</td><td class="r">${n(d.po.Total)}</td></tr>
+          <tr><td colspan="${span}" class="r">Total (${UI.esc(sym)})</td><td class="r">${n(d.po.Total)}</td></tr>
         </tfoot>
       </table>
       ${d.po.Remarks ? `<p><strong>Remarks:</strong> ${UI.esc(d.po.Remarks)}</p>` : ''}
