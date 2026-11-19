@@ -15286,7 +15286,7 @@ function thisMonth() {
 
 async function payrollHome(root, K) {
   const tab = payState.tab[K.kind] || 'sheets';
-  root.innerHTML = pageHead(K.title, K.sub, `<button class="btn btn-primary hidden" id="payNewBtn"></button>`) +
+  root.innerHTML = pageHead(K.title, K.sub, `<span id="payIE"></span><button class="btn btn-primary hidden" id="payNewBtn"></button>`) +
     `<div class="tabs" id="payTabs"></div>
      <div class="card">
        <div class="card-head"><div class="filters" id="payFilters"></div></div>
@@ -15419,6 +15419,18 @@ async function payrollRegister(K, projects) {
   nb.textContent = '+ Add ' + K.person;
   nb.classList.toggle('hidden', !d.canManage);
   nb.onclick = () => payrollPersonForm(K, projects, null, d.mates);
+  // Bulk import, its template and export (owner's request, 19 Nov 2026): the
+  // same bar as the other registers. The import asks for the project when
+  // "All my projects" is showing; the export needs one chosen.
+  const ie = document.getElementById('payIE');
+  ie.innerHTML = '';
+  ie.style.display = 'inline-flex';
+  ie.style.marginRight = '8px';
+  ie.appendChild(importExportBar(K.kind === 'LABOUR' ? 'LABOUR' : 'EMPLOYEES', payState.project[K.kind] || null,
+    () => payrollRegister(K, projects), d.canManage,
+    () => ({ projectId: payState.project[K.kind] || '', search: document.getElementById('paySearch').value,
+             filters: { Status: document.getElementById('payPStatus').value } }),
+    { projectScoped: true }));
   const tiles = document.getElementById('payTotals');
   tiles.classList.remove('hidden');
   tiles.innerHTML = statTile('On the register', String(d.totals.people), d.totals.active + ' active') +
