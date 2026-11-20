@@ -459,6 +459,7 @@ table.data.compare tfoot th{background:var(--surface-2,#f8fafc);font-weight:600}
 /* ---------------------------------------------- Phase 7: stock and stores */
 /* A pair of labelled panels, for "delivered from / into" style headers. */
 .grid-2{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:16px}
+.grid-2.grid-35-65{grid-template-columns:minmax(0,35fr) minmax(0,65fr)}
 .grid-2 .box, .box{border:1px solid var(--border);border-radius:var(--radius);padding:12px 14px;
   background:var(--surface-2)}
 .box h4{margin:0 0 6px;font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted)}
@@ -468,7 +469,7 @@ table.data tr.row-error > td{background:var(--red-50,#fef2f2)}
 :root[data-theme="dark"] table.data tr.row-error > td{background:var(--over-soft)}
 .text-red{color:var(--red-600,#dc2626)}
 
-@media (max-width:900px){ .grid-2{grid-template-columns:1fr} }
+@media (max-width:900px){ .grid-2, .grid-2.grid-35-65{grid-template-columns:1fr} }
 
 /* ------------------------------------------- Phase 8: billing comparison */
 /* Two bars per period — certified against received — so the collection gap
@@ -12441,7 +12442,7 @@ async function pageSubcontractor(root, subId) {
             ? cash(d.totals.advanceUntagged) + ' not yet on an agreement'
             : 'recovered from bills')}
      </div>
-     <div class="grid-2">
+     <div class="grid-2 grid-35-65">
        <div class="card">
          <div class="card-head"><h3>Details</h3>${UI.badge(s.Status)}</div>
          <div class="card-body"><dl class="dl">
@@ -12493,6 +12494,10 @@ async function pageSubcontractor(root, subId) {
         render: r => `<a href="#" class="link" data-agr="${r.AgreementID}">${r.AgreementID}</a>` },
       { key: 'ProjectName', label: 'Project' },
       { key: 'Scope', label: 'Scope' },
+      // Labour only or with material (owner, 20 Nov 2026).
+      { key: 'RateBasis', label: 'Rate basis', width: '110px', render: r => r.RateBasis
+          ? UI.badge(r.RateBasis, r.RateBasis === 'With material' ? 'blue' : 'grey')
+          : '<span class="muted">Not stated</span>' },
       { key: 'ContractValue', label: 'Value', align: 'right', render: r => cash(r.ContractValue) },
       { key: 'BilledValue', label: 'Billed', align: 'right', render: r => cash(r.BilledValue) },
       { key: 'Outstanding', label: 'Outstanding', align: 'right', render: r => cash(r.Outstanding) },
@@ -12787,6 +12792,10 @@ async function loadAgreements() {
           : UI.esc(r.SubcontractorName) },
       { key: 'ProjectName', label: 'Project' },
       { key: 'Scope', label: 'Scope' },
+      // Labour only or with material (owner, 20 Nov 2026).
+      { key: 'RateBasis', label: 'Rate basis', width: '110px', render: r => r.RateBasis
+          ? UI.badge(r.RateBasis, r.RateBasis === 'With material' ? 'blue' : 'grey')
+          : '<span class="muted">Not stated</span>' },
       { key: 'ContractValue', label: 'Value', align: 'right', render: r => cash(r.ContractValue) },
       { key: 'BilledValue', label: 'Billed', align: 'right', render: r => cash(r.BilledValue) },
       { key: 'RemainingValue', label: 'Remaining', align: 'right', render: r => cash(r.RemainingValue) },
