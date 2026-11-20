@@ -8396,6 +8396,7 @@ async function pagePurchaseOrderDetail(root, poId) {
     `<button class="btn btn-danger" id="rejectPo">Send back</button>`,
     `<button class="btn btn-primary" id="approvePo">Approve</button>`);
   if (d.canIssue) actions.push(`<button class="btn btn-primary" id="issuePo">Issue to vendor</button>`);
+  if (d.canSetOnBehalf) actions.push(`<button class="btn" id="behalfPo">On behalf of…</button>`);
   if (d.canCancel) {
     // A part-received order is short-closed, not cancelled. Say which.
     const short = d.cancelEffect && d.cancelEffect.partial;
@@ -8412,6 +8413,10 @@ async function pagePurchaseOrderDetail(root, poId) {
       ${statTile('Delivery', UI.fmt.date(po.DeliveryDate), po.IsOverdue ? 'Overdue' : UI.esc(po.DeliveryLocation))}
       ${statTile('Received', money(d.receivedValue), 'Against ' + money(po.Subtotal - (po.DiscountAmount || 0)))}
     </div>
+    ${d.onBehalf ? `<div class="banner banner-info" style="margin-bottom:16px"><div>Bought on behalf of
+      <strong>${UI.esc(d.onBehalf.Subcontractor || '?')}</strong> under
+      <a href="#" class="link" id="behalfAgr">${UI.esc(d.onBehalf.AgreementID)}</a>${d.onBehalf.Scope ? ' (' + UI.esc(d.onBehalf.Scope) + ')' : ''}.
+      Every payment to the vendor against this order is recovered from his bills.</div></div>` : ''}
     <div class="card"><div class="card-head"><div class="card-title">Lines</div></div>
       <div id="poItems"></div></div>
     <div class="mt-16" style="display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:16px;align-items:start">
@@ -8516,6 +8521,8 @@ async function pagePurchaseOrderDetail(root, poId) {
     }
   }));
   bind('approvePo', () => openPoDecision(d, 'APPROVE'));
+  bind('behalfAgr', e => { e.preventDefault(); navigate('agreement', d.onBehalf.AgreementID); });
+  bind('behalfPo', () => poOnBehalfDialog(d));
   bind('rejectPo', () => openPoDecision(d, 'REJECT'));
   bind('issuePo', () => UI.confirm({
     title: 'Issue to vendor',
@@ -8626,6 +8633,43 @@ async function openPoEditForm(d) {
   buildPoForm(d, [{ ProjectID: d.po.ProjectID, ProjectName: d.project ? d.project.ProjectName : '' }], vendors);
 }
 
+/** Marks an order as bought on a subcontractor's behalf, changes or clears it (20 Nov 2026). */
+async function poOnBehalfDialog(d) {
+  const po = d.po;
+  let list = [];
+  try { list = (await api('listOnBehalfAgreements', po.ProjectID)).data || []; }
+  catch (e) { UI.error('Could not load the agreements', e.message); return; }
+  const current = d.onBehalf ? d.onBehalf.AgreementID : '';
+  const fields = [
+    { name: 'AgreementID', label: 'Bought on behalf of', type: 'select', span: 2,
+      options: [{ value: '', label: 'Nobody: company material' }].concat(list.map(a => ({ value: a.AgreementID,
+        label: a.Subcontractor + ' · ' + a.AgreementID + (a.Scope ? ' · ' + a.Scope : '') }))),
+      hint: list.length ? '' : 'No live agreement on this project is "With material". Set the rate basis on the agreement first.' }
+  ].concat(current ? [{ name: 'Reason', label: 'Reason for the change', type: 'textarea', span: 2, required: true }] : []);
+  const body = UI.el('div');
+  body.appendChild(UI.el('p', { class: 'muted', style: 'margin:0 0 12px',
+    text: 'Every payment to the vendor against this order is then recovered from that subcontractor\'s bills. ' +
+      'It can be set or changed only before the first payment against the order.' }));
+  const form = UI.form(fields, { AgreementID: current });
+  body.appendChild(form);
+  UI.modal({
+    title: po.POID + ': supplied on behalf of', body,
+    footer: [
+      { label: 'Cancel', onClick: m => m.close() },
+      { label: 'Save', class: 'btn-primary', onClick: async m => {
+          const data = UI.validate(form, fields);
+          if (!data) return;
+          m.busy(true);
+          try {
+            const res = await api('setPoOnBehalf', po.POID, data);
+            m.close(); UI.success(res.message);
+            navigate('purchase-order', po.POID);
+          } catch (e) { m.busy(false); UI.error('Could not save', e.message); }
+        } }
+    ]
+  });
+}
+
 function buildPoForm(existing, projects, vendors) {
   const fromRfq = existing && existing.po.RFQID;
   // Approved and not fully received (24 Oct 2026): a change to money needs a
@@ -8642,7 +8686,12 @@ function buildPoForm(existing, projects, vendors) {
     { name: 'PaymentTerms', label: 'Payment terms' },
     { name: 'TaxPercent', label: 'Tax %', type: 'number', value: 0 },
     { name: 'Remarks', label: 'Remarks', type: 'textarea', span: 2 }
-  ].concat(revising ? [{ name: 'Reason', label: 'Reason for the change', type: 'textarea', span: 2,
+  ].concat(existing ? [] : [
+    // Material bought for a subcontractor whose rate includes it (owner, 20 Nov 2026).
+    { name: 'OnBehalfAgreementID', label: 'Supplied on behalf of', type: 'select', span: 2,
+      options: [{ value: '', label: 'Nobody: company material' }],
+      hint: 'A subcontractor whose agreement is "With material": every payment to the vendor against this order is recovered from his bills' }
+  ]).concat(revising ? [{ name: 'Reason', label: 'Reason for the change', type: 'textarea', span: 2,
     hint: 'Needed when quantities, rates, items, discount or tax change.' }] : []);
   const values = existing ? {
     ProjectID: existing.po.ProjectID, VendorID: existing.po.VendorID,
@@ -8660,6 +8709,26 @@ function buildPoForm(existing, projects, vendors) {
   }
   const form = UI.form(fields, values);
   body.appendChild(form);
+  const behalfSel = form.querySelector('[name="OnBehalfAgreementID"]');
+  if (behalfSel) {
+    const projSel = form.querySelector('[name="ProjectID"]');
+    const loadBehalf = async () => {
+      const keep = behalfSel.value;
+      behalfSel.innerHTML = '<option value="">Nobody: company material</option>';
+      if (!projSel || !projSel.value) return;
+      try {
+        const list = (await api('listOnBehalfAgreements', projSel.value)).data || [];
+        list.forEach(a => {
+          const o = UI.el('option', { value: a.AgreementID });
+          o.textContent = a.Subcontractor + ' · ' + a.AgreementID + (a.Scope ? ' · ' + a.Scope : '');
+          behalfSel.appendChild(o);
+        });
+        behalfSel.value = list.some(a => a.AgreementID === keep) ? keep : '';
+      } catch (e) { /* an older server: leave it as company material */ }
+    };
+    if (projSel) projSel.addEventListener('change', loadBehalf);
+    loadBehalf();
+  }
 
   const itemsWrap = UI.el('div', { class: 'card mt-16' });
   itemsWrap.innerHTML = `<div class="card-head"><div class="card-title">Lines</div>
@@ -13088,7 +13157,13 @@ async function agreementForm(existing, subId, onSaved, fixedProjectId) {
     { name: 'SubcontractorID', label: 'Subcontractor', type: 'select', required: true,
       options: subs.map(x => ({ value: x.SubcontractorID, label: x.CompanyName + ' (' + x.Trade + ')' })),
       readonly: !!existing },
-    { name: 'Scope', label: 'Scope of work', required: true, type: 'textarea', span: 2 }
+    { name: 'Scope', label: 'Scope of work', required: true, type: 'textarea', span: 2 },
+    // What the rate covers (owner, 20 Nov 2026): only a with-material agreement can
+    // have material bought on his behalf, recovered from his bills.
+    { name: 'RateBasis', label: 'Rate basis', type: 'select', required: isNew || !!(existing && existing.RateBasis),
+      options: [{ value: 'Labour only', label: 'Labour only — material is the company\'s' },
+                { value: 'With material', label: 'With material — his rate includes material' }],
+      hint: 'With material: material the company buys for him is recovered from his bills' }
   ].concat(isNew ? [
     { name: 'Basis', label: 'How is this subcontract billed?', type: 'select', required: true, span: 2,
       options: [{ value: 'measured', label: 'Measured — quantity × rate per line (SFT, Cft, Nos…)' },
@@ -13214,7 +13289,8 @@ async function pageAgreement(root, agreementId) {
 
   root.innerHTML =
     pageHead(agreementId, (d.subcontractor ? d.subcontractor.CompanyName : '') +
-      ' · ' + (d.project ? d.project.ProjectName : ''), actions.join(' ')) +
+      ' · ' + (d.project ? d.project.ProjectName : '') +
+      ' · ' + (a.RateBasis || 'Rate basis not stated'), actions.join(' ')) +
     `<div class="stat-grid" style="margin-bottom:16px">
        ${statTile('Contract value', cash(p.contractValue),
            a.IsMeasured ? p.lineCount + ' measured line(s)' : UI.esc(a.Scope || ''))}
