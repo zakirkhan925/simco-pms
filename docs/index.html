@@ -12447,6 +12447,12 @@ async function pageSubcontractor(root, subId) {
          <div id="subAgreements"></div>
        </div>
      </div>
+     ${(d.onBehalf || []).length ? `<div class="card" style="margin-top:16px">
+       <div class="card-head"><h3>Paid to suppliers on his behalf</h3>
+         <span class="muted">${cash(d.totals.onBehalfPaid)} paid · ${cash(d.totals.onBehalfOutstanding)} still to deduct from his bills` +
+         `${d.totals.onBehalfUnassigned ? ' · ' + cash(d.totals.onBehalfUnassigned) + ' not yet on an agreement' : ''}</span></div>
+       <div id="subOnBehalf"></div>
+     </div>` : ''}
      ${(d.advances || []).length ? `<div class="card" style="margin-top:16px">
        <div class="card-head"><h3>Cash advances</h3>
          <span class="muted">Paid by head office or from a site float, recovered through the bills</span></div>
@@ -12494,6 +12500,49 @@ async function pageSubcontractor(root, subId) {
   root.querySelectorAll('[data-agr]').forEach(a => {
     a.onclick = e => { e.preventDefault(); navigate('agreement', a.dataset.agr); };
   });
+
+  // Paid to his suppliers on his behalf (owner, 20 Nov 2026), and attaching one to his agreement.
+  const obHost = document.getElementById('subOnBehalf');
+  if (obHost) {
+    UI.table(obHost, {
+      columns: [
+        { key: 'PaymentDate', label: 'Date', width: '100px', render: r => UI.fmt.date(r.PaymentDate) },
+        { key: 'VendorPaymentID', label: 'Payment', render: r => `<span class="mono">${UI.esc(r.VendorPaymentID)}</span>` +
+            (r.Reference ? `<br><span class="muted" style="font-size:11.5px">${UI.esc(r.Method || '')} ${UI.esc(r.Reference)}</span>` : '') },
+        { key: 'VendorName', label: 'Paid to' },
+        { key: 'ProjectName', label: 'Project' },
+        { key: 'Amount', label: 'Amount', align: 'right', render: r => cash(r.Amount) },
+        { key: 'Recovered', label: 'Deducted', align: 'right', render: r => r.Recovered ? cash(r.Recovered) : '<span class="muted">–</span>' },
+        { key: 'AgreementID', label: 'Recovered through', render: r => r.AgreementID
+            ? `<a href="#" class="link" data-agr="${UI.esc(r.AgreementID)}">${UI.esc(r.AgreementID)}</a>`
+            : (r.Agreements.length && d.canEdit
+                ? `<button class="btn btn-sm btn-primary" data-obattach="${UI.esc(r.RecoveryNoteID)}">Attach</button>`
+                : `<span class="muted" style="font-size:12px">Waiting for an approved agreement on ${UI.esc(r.ProjectName || 'this project')}</span>`) }
+      ],
+      rows: d.onBehalf
+    });
+    obHost.querySelectorAll('[data-agr]').forEach(a => { a.onclick = e => { e.preventDefault(); navigate('agreement', a.dataset.agr); }; });
+    obHost.querySelectorAll('[data-obattach]').forEach(b => { b.onclick = () => {
+      const r = d.onBehalf.find(x => x.RecoveryNoteID === b.dataset.obattach);
+      const f = [{ name: 'AgreementID', label: 'Recover through', type: 'select', required: true, span: 2,
+        options: r.Agreements.map(a => ({ value: a.AgreementID, label: a.AgreementNumber + (a.Scope ? ' — ' + a.Scope : '') +
+          (a.Status !== 'Active' ? ' (' + a.Status + ')' : '') })) }];
+      const body = UI.el('div');
+      body.appendChild(UI.el('p', { class: 'muted', text: r.VendorPaymentID + ': ' + cash(r.Amount) + ' paid ' + UI.fmt.date(r.PaymentDate) +
+        ' to ' + (r.VendorName || 'his supplier') + ' on ' + (r.ProjectName || r.ProjectID) + '. Once attached it is deducted from that agreement’s bills.' }));
+      const form = UI.form(f, {});
+      body.appendChild(form);
+      UI.modal({ title: 'Attach ' + r.VendorPaymentID + ' to an agreement', body, footer: [
+        { label: 'Cancel', onClick: m => m.close() },
+        { label: 'Attach', class: 'btn-primary', onClick: async m => {
+            const v = UI.validate(form, f); if (!v) return;
+            m.busy(true);
+            try { UI.success((await api('attachOnBehalfRecovery', r.RecoveryNoteID, v.AgreementID)).message); m.close(); navigate('subcontractor', subId); }
+            catch (e) { m.busy(false); UI.error('Not attached', e.message); }
+          } }
+      ] });
+    }; });
+  }
 
   const advHost = document.getElementById('subAdvances');
   // The server says so from 24 Oct 2026; before that, the reader's own permissions.
