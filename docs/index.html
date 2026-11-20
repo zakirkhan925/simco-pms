@@ -5960,6 +5960,7 @@ async function loadVendorLedger(vendorId) {
             : r.type === 'Payment'
             ? `<div class="row-actions">` +
               (r.canReassign ? `<button class="btn btn-sm" data-setproj="${UI.esc(r.ref)}">Set project</button> ` : '') +
+              (r.canOnBehalf ? `<button class="btn btn-sm" data-onbehalf="${UI.esc(r.ref)}">On behalf…</button> ` : '') +
               `<button class="btn btn-sm"
                  data-voucher="${UI.esc(r.ref)}">Voucher</button>` +
               // A payment or advance keyed wrong is reversed, not deleted (24 Oct 2026).
@@ -6002,6 +6003,9 @@ async function loadVendorLedger(vendorId) {
     });
     host.querySelectorAll('[data-invoice]').forEach(b => {
       b.onclick = () => openSupplierInvoice(b.dataset.invoice, () => loadVendorLedger(vendorId));
+    });
+    host.querySelectorAll('[data-onbehalf]').forEach(b => {
+      b.onclick = () => openPaymentOnBehalf(d.entries.find(x => x.ref === b.dataset.onbehalf), () => loadVendorLedger(vendorId));
     });
     host.querySelectorAll('[data-setproj]').forEach(b => {
       b.onclick = () => openSetPaymentProject(d.entries.find(x => x.ref === b.dataset.setproj), () => loadVendorLedger(vendorId));
@@ -6514,6 +6518,52 @@ async function openSetPaymentProject(entry, onSaved) {
   });
 }
 
+/**
+ * The agreements a payment may be made on behalf of (owner, 20 Nov 2026): live,
+ * with material. As select options, the subcontractor first so he is easy to find.
+ */
+async function onBehalfOptions(projectId) {
+  let list = [];
+  try { list = (await api('listOnBehalfAgreements', projectId || '')).data || []; } catch (e) { list = []; }
+  return [{ value: '', label: 'Nobody: an ordinary payment' }].concat(list.map(a => ({ value: a.AgreementID,
+    label: a.Subcontractor + ' · ' + a.AgreementID + (a.ProjectName ? ' · ' + a.ProjectName : '') +
+      (a.Scope ? ' · ' + a.Scope : '') })));
+}
+const ON_BEHALF_HINT = 'Paid to his supplier for a subcontractor whose rate includes material: ' +
+  'the whole payment is recovered from his bills. Only "With material" agreements are listed.';
+
+/** Says a payment already recorded was made on a subcontractor's behalf, or changes or clears it. */
+async function openPaymentOnBehalf(entry, onSaved) {
+  const options = await onBehalfOptions(entry.projectId);
+  const fields = [
+    { name: 'AgreementID', label: 'On behalf of', type: 'select', span: 2, options, hint: ON_BEHALF_HINT },
+    { name: 'Reason', label: 'Reason', type: 'textarea', span: 2, required: true }
+  ];
+  const sym = App.settings.currencySymbol || 'Rs';
+  const body = UI.el('div');
+  body.appendChild(UI.el('p', { class: 'muted', style: 'margin:0 0 12px;font-size:13px',
+    text: entry.ref + ' · ' + UI.fmt.date(entry.date) + ' · ' + UI.fmt.money(entry.credit, sym) +
+      (entry.project ? ' · ' + entry.project : '') }));
+  const form = UI.form(fields, { AgreementID: entry.onBehalf || '' });
+  body.appendChild(form);
+  UI.modal({
+    title: entry.ref + ': on behalf of', body,
+    footer: [
+      { label: 'Cancel', onClick: m => m.close() },
+      { label: 'Save', class: 'btn-primary', onClick: async m => {
+          const data = UI.validate(form, fields);
+          if (!data) return;
+          m.busy(true);
+          try {
+            const res = await api('setVendorPaymentOnBehalf', entry.ref, data);
+            m.close(); UI.success('Saved', res.message);
+            if (onSaved) onSaved();
+          } catch (e) { m.busy(false); UI.error('Not saved', e.message); }
+        } }
+    ]
+  });
+}
+
 async function openVendorPaymentForm(vendor, onSaved) {
   let open = [];
   try {
@@ -6530,6 +6580,7 @@ async function openVendorPaymentForm(vendor, onSaved) {
   // Every payment names a project or head office (owner, 12 Nov 2026).
   let projects = [];
   try { projects = (await api('listProjects', { pageSize: 300 })).data.rows; } catch (e) { projects = []; }
+  const behalfOptions = await onBehalfOptions('');
 
   const sym = App.settings.currencySymbol || 'Rs';
   const fields = [
@@ -6553,6 +6604,9 @@ async function openVendorPaymentForm(vendor, onSaved) {
     { name: 'Method', label: 'Method', type: 'select',
       options: (App.enums.PAYMENT_METHODS || ['Bank transfer', 'Cheque', 'Cash']) },
     ...bankFieldFor(), { name: 'Reference', label: 'Cheque / transfer number' },
+    // Paid to a subcontractor's supplier, recovered from his bills (owner, 20 Nov 2026).
+    { name: 'OnBehalfAgreementID', label: 'On behalf of a subcontractor', type: 'select', span: 2,
+      options: behalfOptions, hint: ON_BEHALF_HINT },
     { name: 'Remarks', label: 'Remarks', type: 'textarea', span: 2 }
   ];
   const body = UI.el('div');
@@ -8397,7 +8451,6 @@ async function pagePurchaseOrderDetail(root, poId) {
     `<button class="btn btn-danger" id="rejectPo">Send back</button>`,
     `<button class="btn btn-primary" id="approvePo">Approve</button>`);
   if (d.canIssue) actions.push(`<button class="btn btn-primary" id="issuePo">Issue to vendor</button>`);
-  if (d.canSetOnBehalf) actions.push(`<button class="btn" id="behalfPo">On behalf of…</button>`);
   if (d.canCancel) {
     // A part-received order is short-closed, not cancelled. Say which.
     const short = d.cancelEffect && d.cancelEffect.partial;
@@ -8414,10 +8467,6 @@ async function pagePurchaseOrderDetail(root, poId) {
       ${statTile('Delivery', UI.fmt.date(po.DeliveryDate), po.IsOverdue ? 'Overdue' : UI.esc(po.DeliveryLocation))}
       ${statTile('Received', money(d.receivedValue), 'Against ' + money(po.Subtotal - (po.DiscountAmount || 0)))}
     </div>
-    ${d.onBehalf ? `<div class="banner banner-info" style="margin-bottom:16px"><div>Bought on behalf of
-      <strong>${UI.esc(d.onBehalf.Subcontractor || '?')}</strong> under
-      <a href="#" class="link" id="behalfAgr">${UI.esc(d.onBehalf.AgreementID)}</a>${d.onBehalf.Scope ? ' (' + UI.esc(d.onBehalf.Scope) + ')' : ''}.
-      Every payment to the vendor against this order is recovered from his bills.</div></div>` : ''}
     <div class="card"><div class="card-head"><div class="card-title">Lines</div></div>
       <div id="poItems"></div></div>
     <div class="mt-16" style="display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:16px;align-items:start">
@@ -8522,8 +8571,6 @@ async function pagePurchaseOrderDetail(root, poId) {
     }
   }));
   bind('approvePo', () => openPoDecision(d, 'APPROVE'));
-  bind('behalfAgr', e => { e.preventDefault(); navigate('agreement', d.onBehalf.AgreementID); });
-  bind('behalfPo', () => poOnBehalfDialog(d));
   bind('rejectPo', () => openPoDecision(d, 'REJECT'));
   bind('issuePo', () => UI.confirm({
     title: 'Issue to vendor',
@@ -8634,43 +8681,6 @@ async function openPoEditForm(d) {
   buildPoForm(d, [{ ProjectID: d.po.ProjectID, ProjectName: d.project ? d.project.ProjectName : '' }], vendors);
 }
 
-/** Marks an order as bought on a subcontractor's behalf, changes or clears it (20 Nov 2026). */
-async function poOnBehalfDialog(d) {
-  const po = d.po;
-  let list = [];
-  try { list = (await api('listOnBehalfAgreements', po.ProjectID)).data || []; }
-  catch (e) { UI.error('Could not load the agreements', e.message); return; }
-  const current = d.onBehalf ? d.onBehalf.AgreementID : '';
-  const fields = [
-    { name: 'AgreementID', label: 'Bought on behalf of', type: 'select', span: 2,
-      options: [{ value: '', label: 'Nobody: company material' }].concat(list.map(a => ({ value: a.AgreementID,
-        label: a.Subcontractor + ' · ' + a.AgreementID + (a.Scope ? ' · ' + a.Scope : '') }))),
-      hint: list.length ? '' : 'No live agreement on this project is "With material". Set the rate basis on the agreement first.' }
-  ].concat(current ? [{ name: 'Reason', label: 'Reason for the change', type: 'textarea', span: 2, required: true }] : []);
-  const body = UI.el('div');
-  body.appendChild(UI.el('p', { class: 'muted', style: 'margin:0 0 12px',
-    text: 'Every payment to the vendor against this order is then recovered from that subcontractor\'s bills. ' +
-      'It can be set or changed only before the first payment against the order.' }));
-  const form = UI.form(fields, { AgreementID: current });
-  body.appendChild(form);
-  UI.modal({
-    title: po.POID + ': supplied on behalf of', body,
-    footer: [
-      { label: 'Cancel', onClick: m => m.close() },
-      { label: 'Save', class: 'btn-primary', onClick: async m => {
-          const data = UI.validate(form, fields);
-          if (!data) return;
-          m.busy(true);
-          try {
-            const res = await api('setPoOnBehalf', po.POID, data);
-            m.close(); UI.success(res.message);
-            navigate('purchase-order', po.POID);
-          } catch (e) { m.busy(false); UI.error('Could not save', e.message); }
-        } }
-    ]
-  });
-}
-
 function buildPoForm(existing, projects, vendors) {
   const fromRfq = existing && existing.po.RFQID;
   // Approved and not fully received (24 Oct 2026): a change to money needs a
@@ -8687,12 +8697,7 @@ function buildPoForm(existing, projects, vendors) {
     { name: 'PaymentTerms', label: 'Payment terms' },
     { name: 'TaxPercent', label: 'Tax %', type: 'number', value: 0 },
     { name: 'Remarks', label: 'Remarks', type: 'textarea', span: 2 }
-  ].concat(existing ? [] : [
-    // Material bought for a subcontractor whose rate includes it (owner, 20 Nov 2026).
-    { name: 'OnBehalfAgreementID', label: 'Supplied on behalf of', type: 'select', span: 2,
-      options: [{ value: '', label: 'Nobody: company material' }],
-      hint: 'A subcontractor whose agreement is "With material": every payment to the vendor against this order is recovered from his bills' }
-  ]).concat(revising ? [{ name: 'Reason', label: 'Reason for the change', type: 'textarea', span: 2,
+  ].concat(revising ? [{ name: 'Reason', label: 'Reason for the change', type: 'textarea', span: 2,
     hint: 'Needed when quantities, rates, items, discount or tax change.' }] : []);
   const values = existing ? {
     ProjectID: existing.po.ProjectID, VendorID: existing.po.VendorID,
@@ -8710,26 +8715,6 @@ function buildPoForm(existing, projects, vendors) {
   }
   const form = UI.form(fields, values);
   body.appendChild(form);
-  const behalfSel = form.querySelector('[name="OnBehalfAgreementID"]');
-  if (behalfSel) {
-    const projSel = form.querySelector('[name="ProjectID"]');
-    const loadBehalf = async () => {
-      const keep = behalfSel.value;
-      behalfSel.innerHTML = '<option value="">Nobody: company material</option>';
-      if (!projSel || !projSel.value) return;
-      try {
-        const list = (await api('listOnBehalfAgreements', projSel.value)).data || [];
-        list.forEach(a => {
-          const o = UI.el('option', { value: a.AgreementID });
-          o.textContent = a.Subcontractor + ' · ' + a.AgreementID + (a.Scope ? ' · ' + a.Scope : '');
-          behalfSel.appendChild(o);
-        });
-        behalfSel.value = list.some(a => a.AgreementID === keep) ? keep : '';
-      } catch (e) { /* an older server: leave it as company material */ }
-    };
-    if (projSel) projSel.addEventListener('change', loadBehalf);
-    loadBehalf();
-  }
 
   const itemsWrap = UI.el('div', { class: 'card mt-16' });
   itemsWrap.innerHTML = `<div class="card-head"><div class="card-title">Lines</div>
@@ -14766,6 +14751,7 @@ async function cashSpendDialog(accountId, d) {
   const vendors = vndRes.data.rows.filter(v => String(v.Status) !== 'Blacklisted');
   const subs = subRes.data.rows.filter(x => String(x.Status) !== 'Blacklisted');
   const allAgreements = agrRes.data.rows;
+  const behalfOptions = await onBehalfOptions('');
 
   const fields = (multi ? [
     { name: 'ProjectID', label: 'Project', type: 'select', required: true, span: 2,
@@ -14806,6 +14792,9 @@ async function cashSpendDialog(accountId, d) {
         : 'No vendor to choose: none on file, or your role cannot view vendors' },
     { name: 'POID', label: 'Against purchase order', type: 'select', options: [],
       hint: 'Optional' },
+    // Paid to a subcontractor's supplier, recovered from his bills (owner, 20 Nov 2026).
+    { name: 'OnBehalfAgreementID', label: 'On behalf of a subcontractor', type: 'select', span: 2,
+      options: behalfOptions, hint: ON_BEHALF_HINT },
     { name: 'StaffAdvanceID', label: 'Advance being settled', type: 'select',
       options: advances.map(a => ({ value: a.StaffAdvanceID,
         label: a.PersonName + (a.PersonType ? ' (' + a.PersonType.toLowerCase() + ')' : '') + ' — ' +
@@ -14830,7 +14819,7 @@ async function cashSpendDialog(accountId, d) {
     EXPENSE:          ['Category', 'CostCode', 'PayeeName', 'Description'],
     SUBPAYMENT:       ['SubBillID', 'Description'],
     SUBADVANCE:       ['SubcontractorID', 'AgreementID', 'Description'],
-    VENDOR_ADVANCE:   ['VendorID', 'POID', 'Description'],
+    VENDOR_ADVANCE:   ['VendorID', 'POID', 'OnBehalfAgreementID', 'Description'],
     STAFF_ADVANCE:    ['PersonType', 'PersonID', 'PersonName', 'Description'],
     ADVANCE_RECOVERY: ['StaffAdvanceID', 'Description'],
     RETURN:           ['Description']
