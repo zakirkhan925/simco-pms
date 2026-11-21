@@ -66,6 +66,7 @@
     agreement: 'subcontractors',
     subbill: 'subcontractors',
     payables: 'subcontractors', 'unassigned-payments': 'subcontractors',
+    'stock-adjustments': 'stock',
     'cash-account': 'cash',
     'cash-reports': 'cash',
     'cash-report': 'cash',

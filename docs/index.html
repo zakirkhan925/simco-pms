@@ -460,6 +460,9 @@ table.data.compare tfoot th{background:var(--surface-2,#f8fafc);font-weight:600}
 /* A pair of labelled panels, for "delivered from / into" style headers. */
 .grid-2{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:16px}
 .grid-2.grid-35-65{grid-template-columns:minmax(0,35fr) minmax(0,65fr)}
+/* Section headings in line tables (21 Nov 2026). */
+tr.section-row td{background:var(--surface-2,#f4f5f7);font-weight:600;font-size:12.5px;letter-spacing:.2px;padding-top:8px;padding-bottom:8px}
+tr.line-head td{background:var(--surface-2,#f4f5f7)}
 .grid-2 .box, .box{border:1px solid var(--border);border-radius:var(--radius);padding:12px 14px;
   background:var(--surface-2)}
 .box h4{margin:0 0 6px;font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted)}
@@ -1112,7 +1115,7 @@ const UI = (() => {
    * columns: [{key, label, align, width, render(row), sortable}]
    * Renders into `mount`; returns nothing (state lives with the caller).
    */
-  function table(mount, { columns, rows, empty, onSort, sortBy, sortDir, rowKey }) {
+  function table(mount, { columns, rows, empty, onSort, sortBy, sortDir, rowKey, section }) {
     mount.innerHTML = '';
     if (!rows.length) { mount.innerHTML = empty || emptyState('Nothing here yet', 'No records match the current filters.'); return; }
     const wrap = el('div', { class: 'table-wrap' });
@@ -1131,7 +1134,19 @@ const UI = (() => {
     });
     thead.appendChild(tr);
     const tbody = el('tbody');
+    // Section headings (21 Nov 2026): section(row) names the heading a row sits under; a full-width
+    // row is put in wherever it changes.
+    let lastSection = null;
     rows.forEach(row => {
+      if (section) {
+        const sec = section(row) || '';
+        if (sec && sec !== lastSection) {
+          const h = el('tr', { class: 'section-row' });
+          h.appendChild(el('td', { text: sec, colspan: String(columns.length) }));
+          tbody.appendChild(h);
+        }
+        lastSection = sec;
+      }
       const r = el('tr');
       if (rowKey) r.dataset.key = row[rowKey];
       columns.forEach(c => {
@@ -9128,7 +9143,9 @@ async function pageStock(root, arg) {
       (can('stock.item.create') ? `<button class="btn" id="newItemBtn">+ New item</button>
         <button class="btn" id="newRoomBtn">+ New store</button>` : '') +
       (can('stock.adjust') ? `<button class="btn" id="openingBtn">Opening stock</button>` : '') +
-      (can('stock.transfer') ? `<button class="btn" id="transferBtn">Transfer</button>` : '')) +
+      (can('stock.transfer') ? `<button class="btn" id="transferBtn">Transfer</button>` : '') +
+      // Count corrections and write-offs waiting for approval (owner, 21 Nov 2026).
+      `<button class="btn" id="adjListBtn">Adjustments &amp; write-offs</button>`) +
     `<div id="stockSummary" class="stat-grid" style="margin-bottom:16px"></div>
      <div class="card">
        <div class="card-head">
@@ -9181,6 +9198,7 @@ async function pageStock(root, arg) {
   bind('newRoomBtn', () => openStockRoomForm());
   bind('openingBtn', () => openOpeningStockForm(rooms));
   bind('transferBtn', () => openTransferForm(rooms));
+  bind('adjListBtn', () => navigate('stock-adjustments'));
 
   await loadStock();
 }
@@ -9561,56 +9579,129 @@ async function openTransferForm(rooms) {
 }
 
 function openAdjustmentForm(ledger, roomId) {
+  // Raised, then approved before stock moves (owner, 21 Nov 2026): a count correction,
+  // or wastage / damage written off with a reason from the list.
   const bal = ledger.balances.find(b => b.StockRoomID === roomId) || { Closing: 0 };
+  const reasons = (App.enums && App.enums.STOCK_WRITEOFF_REASONS) ||
+    ['Breakage', 'Expired', 'Weather damage', 'Handling damage', 'Theft / lost', 'Site wastage', 'Other'];
   const fields = [
-    { name: 'QtyAfter', label: 'Counted quantity', type: 'number', required: true,
-      value: bal.Closing },
-    { name: 'Reason', label: 'Reason', type: 'textarea', required: true, span: 2,
-      hint: 'Why the shelf disagrees with the books. Kept on the record.' }
+    { name: 'Kind', label: 'What is it?', type: 'select', required: true, span: 2,
+      options: [{ value: 'Adjustment', label: 'Count correction: the shelf disagrees with the books' },
+                { value: 'Wastage', label: 'Wastage: write off' }, { value: 'Damage', label: 'Damage: write off' }] },
+    { name: 'QtyAfter', label: 'Counted quantity', type: 'number', value: bal.Closing },
+    { name: 'Quantity', label: 'Quantity written off', type: 'number' },
+    { name: 'ReasonCode', label: 'Reason', type: 'select', options: [''].concat(reasons) },
+    { name: 'Reason', label: 'Details', type: 'textarea', span: 2,
+      hint: 'What happened. Required for a count correction, and when the reason is Other.' }
   ];
   const body = UI.el('div');
   body.innerHTML = `<div class="banner banner-warn"><div>
     Book stock for <strong>${UI.esc(ledger.item.ItemCode)}</strong> is
     <strong>${UI.fmt.number(bal.Closing, 3)} ${UI.esc(ledger.item.Unit)}</strong>.
-    The difference is posted as a movement — the balance is never simply overwritten.
+    Nothing changes until it is <strong>approved</strong>; then the difference is posted as a movement.
   </div></div>`;
   const form = UI.form(fields);
   body.appendChild(form);
-
-  const diff = UI.el('div', { class: 'mt-16', id: 'adjDiff' });
+  const diff = UI.el('div', { class: 'mt-16' });
   body.appendChild(diff);
+  const row = n => { const el = form.querySelector(`[name="${n}"]`); return el.closest('.field') || el.parentElement; };
   const refresh = () => {
-    const counted = Number(form.querySelector('[name="QtyAfter"]').value);
-    if (isNaN(counted)) { diff.innerHTML = ''; return; }
-    const d = Math.round((counted - Number(bal.Closing)) * 10000) / 10000;
-    diff.innerHTML = d === 0
-      ? `<div class="banner banner-info"><div>No difference — nothing to adjust.</div></div>`
-      : `<div class="banner banner-warn"><div>Difference:
-          <strong>${d > 0 ? '+' : ''}${UI.fmt.number(d, 3)} ${UI.esc(ledger.item.Unit)}</strong>
-          — stock will be adjusted ${d > 0 ? 'up' : 'down'}.</div></div>`;
+    const kind = form.querySelector('[name="Kind"]').value;
+    const count = kind === 'Adjustment';
+    row('QtyAfter').style.display = count ? '' : 'none';
+    row('Quantity').style.display = count ? 'none' : '';
+    row('ReasonCode').style.display = count ? 'none' : '';
+    const d = count ? Math.round((Number(form.querySelector('[name="QtyAfter"]').value) - Number(bal.Closing)) * 10000) / 10000
+      : -Math.abs(Number(form.querySelector('[name="Quantity"]').value) || 0);
+    diff.innerHTML = !d || isNaN(d)
+      ? `<div class="banner banner-info"><div>${count ? 'No difference: nothing to adjust.' : 'Enter the quantity written off.'}</div></div>`
+      : `<div class="banner banner-warn"><div>Once approved: stock goes
+          <strong>${d > 0 ? 'up' : 'down'} ${UI.fmt.number(Math.abs(d), 3)} ${UI.esc(ledger.item.Unit)}</strong>.</div></div>`;
   };
-  form.querySelector('[name="QtyAfter"]').addEventListener('input', refresh);
+  form.querySelectorAll('[name="Kind"],[name="QtyAfter"],[name="Quantity"]').forEach(el => {
+    el.addEventListener('input', refresh); el.addEventListener('change', refresh); });
   refresh();
 
   UI.modal({
-    title: 'Adjust stock — ' + ledger.item.ItemCode, size: 'wide', body,
+    title: 'Adjust or write off: ' + ledger.item.ItemCode, size: 'wide', body,
     footer: [
       { label: 'Cancel', onClick: m => m.close() },
-      { label: 'Post adjustment', class: 'btn-primary', onClick: async m => {
-        const data = UI.validate(form, fields);
+      { label: 'Send for approval', class: 'btn-primary', onClick: async m => {
+        const data = UI.readForm ? UI.readForm(form) : UI.validate(form, fields);
         if (!data) return;
         m.busy(true);
         try {
-          const res = await api('createStockAdjustment',
-            { StockRoomID: roomId, ItemID: ledger.item.ItemID,
-              QtyAfter: data.QtyAfter, Reason: data.Reason });
-          m.close(); UI.success('Adjustment posted', res.message);
-          navigate('stock');
-        } catch (e) { UI.error('Could not adjust', e.message); }
+          const res = await api('createStockAdjustment', { StockRoomID: roomId, ItemID: ledger.item.ItemID, Kind: data.Kind,
+            QtyAfter: data.QtyAfter, Quantity: data.Quantity, ReasonCode: data.ReasonCode, Reason: data.Reason });
+          m.close(); UI.success('Sent for approval', res.message);
+          navigate('stock-adjustments');
+        } catch (e) { UI.error('Not sent', e.message); }
         finally { m.busy(false); }
       }}
     ]
   });
+}
+
+/* ================================================ ADJUSTMENTS & WRITE-OFFS */
+
+const adjState = { status: 'Pending Approval' };
+const ADJ_TONE = { 'Pending Approval': 'amber', Approved: 'green', Rejected: 'red', Cancelled: 'grey', Posted: 'green' };
+
+async function pageStockAdjustments(root) {
+  let d;
+  try { d = (await api('listStockAdjustments', { status: adjState.status })).data; }
+  catch (e) { root.innerHTML = pageHead('Adjustments & write-offs', '') + UI.errorState(e.message); return; }
+  root.innerHTML = pageHead('Adjustments & write-offs',
+      'Count corrections, wastage and damage: raised, then approved before stock moves',
+      `<button class="btn" id="adjBack">Back to stock</button>`) +
+    `<div class="card"><div class="card-head"><div class="filters">
+       <div class="field"><label for="adjStatus">Status</label><select class="input" id="adjStatus">
+         ${['Pending Approval', 'Approved', 'Rejected', 'Cancelled', ''].map(s =>
+           `<option value="${s}">${s || 'All'}</option>`).join('')}</select></div>
+       <span class="muted" style="align-self:center">${d.canApprove ? 'You can approve.' :
+         'Raise one from an item\'s ledger on the Stock page (Adjust stock).'}</span>
+     </div></div><div id="adjTable"></div></div>`;
+  const st = document.getElementById('adjStatus');
+  st.value = adjState.status;
+  st.onchange = () => { adjState.status = st.value; pageStockAdjustments(root); };
+  document.getElementById('adjBack').onclick = () => navigate('stock');
+  UI.table(document.getElementById('adjTable'), {
+    columns: [
+      { key: 'AdjustmentID', label: 'No.', width: '95px', render: r => `<span class="mono">${UI.esc(r.AdjustmentID)}</span><br>
+          <span class="muted" style="font-size:11.5px">${UI.esc(UI.fmt.date(r.AdjDate))}</span>` },
+      { key: 'Kind', label: 'Kind', render: r => UI.esc(r.Kind) + (r.ReasonCode ? `<br><span class="muted" style="font-size:12px">${UI.esc(r.ReasonCode)}</span>` : '') },
+      { key: 'ItemCode', label: 'Item', render: r => `<strong>${UI.esc(r.ItemCode)}</strong> ${UI.esc(r.ItemName)}` +
+          `<br><span class="muted" style="font-size:12px">${UI.esc(r.StockRoomName)}</span>` },
+      { key: 'Difference', label: 'Change', align: 'right', render: r =>
+          `<strong class="${r.Difference < 0 ? 'num-neg' : 'num-pos'}">${r.Difference > 0 ? '+' : ''}${UI.fmt.number(r.Difference, 3)}</strong> ${UI.esc(r.Unit)}` +
+          `<br><span class="muted" style="font-size:11.5px">book ${UI.fmt.number(r.QtyBefore, 3)} → ${UI.fmt.number(r.QtyAfter, 3)}</span>` },
+      { key: 'Value', label: 'Value', align: 'right', render: r => cash(r.Value) },
+      { key: 'Reason', label: 'Details', render: r => UI.esc(r.Reason || '') +
+          `<br><span class="muted" style="font-size:11.5px">by ${UI.esc(r.RaisedBy)}` +
+          (r.DecidedByName && r.Status !== 'Pending Approval' ? ` · ${UI.esc(r.Status.toLowerCase())} by ${UI.esc(r.DecidedByName)}` : '') +
+          (r.DecisionRemarks ? `: ${UI.esc(r.DecisionRemarks)}` : '') + (r.CancelReason ? ` · ${UI.esc(r.CancelReason)}` : '') + '</span>' },
+      { key: 'Status', label: 'Status', render: r => UI.badge(r.Status, ADJ_TONE[r.Status]) },
+      { key: 'x', label: '', align: 'right', render: r => `<div class="row-actions">` +
+          (r.CanDecide ? `<button class="btn btn-sm btn-primary" data-adjok="${UI.esc(r.AdjustmentID)}">Approve</button>
+             <button class="btn btn-sm btn-danger" data-adjno="${UI.esc(r.AdjustmentID)}">Reject</button>` : '') +
+          (r.CanCancel ? ` <button class="btn btn-sm" data-adjcancel="${UI.esc(r.AdjustmentID)}">Withdraw</button>` : '') + `</div>` }
+    ],
+    rows: d.rows,
+    empty: UI.emptyState('Nothing here', adjState.status === 'Pending Approval' ? 'Nothing is waiting for approval.' : 'No adjustments match.')
+  });
+  const reload = () => pageStockAdjustments(root);
+  root.querySelectorAll('[data-adjok]').forEach(b => { b.onclick = () => UI.confirm({
+    title: 'Approve ' + b.dataset.adjok, message: 'The stock is adjusted now, at the average rate.', confirmLabel: 'Approve',
+    onConfirm: async m => {
+      try { UI.success('Approved', (await api('decideStockAdjustment', b.dataset.adjok, 'APPROVE', '')).message); m.close(); reload(); }
+      catch (e) { UI.error('Not approved', e.message); }
+    } }); });
+  root.querySelectorAll('[data-adjno]').forEach(b => { b.onclick = () => openReasonModal({
+    title: 'Reject ' + b.dataset.adjno, label: 'Why is it rejected?', confirmLabel: 'Reject', danger: true,
+    onConfirm: async reason => { UI.success('Rejected', (await api('decideStockAdjustment', b.dataset.adjno, 'REJECT', reason)).message); reload(); } }); });
+  root.querySelectorAll('[data-adjcancel]').forEach(b => { b.onclick = () => openReasonModal({
+    title: 'Withdraw ' + b.dataset.adjcancel, label: 'Why is it withdrawn?', confirmLabel: 'Withdraw',
+    onConfirm: async reason => { UI.success('Withdrawn', (await api('cancelStockAdjustment', b.dataset.adjcancel, reason)).message); reload(); } }); });
 }
 
 /* ======================================================== GOODS RECEIPTS */
@@ -10839,6 +10930,8 @@ PAGES['goods-receipts'] = pageGoodsReceipts;
 PAGES['goods-returns'] = pageGoodsReturns;
 PAGES['material-issues'] = pageMaterialIssues;
 PAGES['transfers'] = pageTransfers;
+PAGES['stock-adjustments'] = pageStockAdjustments;
+ROUTE_PARENTS['stock-adjustments'] = 'stock';
 </script>
 
   <script>
@@ -12418,9 +12511,12 @@ async function pageSubcontractor(root, subId) {
       (d.canCreateAgreement ? ` <button class="btn btn-primary" id="newAgrBtn">+ New agreement</button>` : '')) +
     `<div class="stat-grid" style="margin-bottom:16px">
        ${(() => {
-         // Terminated agreements are not counted as contracted (owner, 21 Nov 2026).
+         // Only approved agreements are contracted (owner, 21 Nov 2026).
+         const counted = d.agreements.filter(a => ['Active', 'Suspended', 'Completed'].indexOf(a.Status) !== -1).length;
+         const waiting = d.agreements.filter(a => ['Draft', 'Pending Approval', 'Returned'].indexOf(a.Status) !== -1).length;
          const ended = d.agreements.filter(a => a.Status === 'Terminated').length;
-         return statTile('Contracted', cash(d.totals.contracted), (d.agreements.length - ended) + ' agreement(s)' +
+         return statTile('Contracted', cash(d.totals.contracted), counted + ' approved agreement(s)' +
+           (waiting ? ' · ' + waiting + ' awaiting approval not counted' : '') +
            (ended ? ' · ' + ended + ' terminated not counted' : ''));
        })()}
        ${statTile('Work billed', cash(d.totals.billed), 'gross value approved')}
@@ -12880,6 +12976,7 @@ function lineQty(n) {
 function lineGrid(items, units, opts) {
   const o = opts || {};
   const rows = (items || []).map(i => ({
+    Section: i.Section || '',
     AgreementItemID: i.AgreementItemID, ItemCode: i.ItemCode || '', Description: i.Description || '',
     Unit: i.Unit || '', Quantity: i.Quantity, Rate: i.Rate, Remarks: i.Remarks || '',
     BOQItems: i.BOQItems || '', BOQShare: i.BOQShare === null || i.BOQShare === undefined ? '' : i.BOQShare,
@@ -12907,6 +13004,7 @@ function lineGrid(items, units, opts) {
        </table>
      </div>
      <button class="btn mt-8" type="button" id="lineAdd">+ Add line</button>
+     <button class="btn mt-8" type="button" id="headAdd" title="A heading such as &quot;Internal Distemper Work (Walls)&quot;: the lines below it sit under it">+ Add section heading</button>
      <datalist class="boq-codes"></datalist>
      <p class="muted boq-note" style="display:none;margin:8px 0 0;font-size:12.5px">Pick a BOQ item as the code and
        its quantity is tracked against the BOQ under Budget &rarr; Trade works (Sft against Sqm and the like is converted).
@@ -12944,7 +13042,7 @@ function lineGrid(items, units, opts) {
 
   const recalc = () => {
     let total = 0;
-    tbody.querySelectorAll('tr').forEach(tr => {
+    tbody.querySelectorAll('tr:not(.line-head)').forEach(tr => {
       const q = Number(tr.querySelector('[data-f=Quantity]').value || 0);
       const r = Number(tr.querySelector('[data-f=Rate]').value || 0);
       const amt = q * r;
@@ -13062,15 +13160,30 @@ function lineGrid(items, units, opts) {
     });
   }
 
+  /** A section heading row: every line below it, up to the next heading, sits under it (21 Nov 2026). */
+  const addHead = (text) => {
+    const tr = UI.el('tr', { class: 'line-head' });
+    tr.innerHTML = `<td colspan="6"><input class="input" data-h="1" value="${UI.esc(text || '')}"
+        placeholder="Section heading, e.g. Internal Distemper Work (Walls)" style="font-weight:600"></td>
+      <td><button class="line-drop" type="button" title="Remove this heading (its lines stay)">×</button></td>`;
+    tbody.appendChild(tr);
+    tr.querySelector('.line-drop').onclick = () => tr.remove();
+    return tr;
+  };
   const blank = { ItemCode: '', Description: '', Unit: '', Quantity: '', Rate: '' };
-  rows.forEach(addRow);
+  let prevSection = '';
+  rows.forEach(r => { if (r.Section && r.Section !== prevSection) addHead(r.Section); prevSection = r.Section; addRow(r); });
   if (!rows.length) addRow(blank);
   recalc();
   root.querySelector('#lineAdd').onclick = () => { addRow(blank); recalc(); };
+  root.querySelector('#headAdd').onclick = () => { addHead('').querySelector('input').focus(); addRow(blank); recalc(); };
 
-  const collect = () => Array.from(tbody.querySelectorAll('tr')).map(tr => {
+  let section = '';
+  const collect = () => (section = '', Array.from(tbody.querySelectorAll('tr')).map(tr => {
+    if (tr.classList.contains('line-head')) { section = tr.querySelector('[data-h]').value.trim(); return null; }
     const get = f => tr.querySelector('[data-f=' + f + ']');
     const out = {
+      Section: section,
       ItemCode: get('ItemCode').value.trim(),
       Description: get('Description').value.trim(),
       Unit: get('Unit').value,
@@ -13082,7 +13195,7 @@ function lineGrid(items, units, opts) {
     // A row nobody touched is not a line.
     const empty = !out.ItemCode && !out.Description && !out.Unit && !out.Quantity && !out.Rate;
     return empty && !tr.dataset.id ? null : out;
-  }).filter(Boolean);
+  }).filter(Boolean));
 
   if (o.boq) setBoq(o.boq);
   return { root, collect, recalc, setBoq: r => setBoq(r && r.rows ? r.rows : r, r && r.links) };
@@ -13173,8 +13286,20 @@ function renderAgreementLines(host, d) {
            <span class="muted" style="font-size:11.5px">${Number(r.ProgressPercent || 0).toFixed(1)}%</span>` }
     ]),
     rows: items,
+    section: r => r.Section,
     empty: UI.emptyState('No lines', '')
   });
+}
+
+/** Rows of an HTML table body with a heading row wherever the section changes (21 Nov 2026). */
+function linesWithSections(list, cols, render) {
+  let last = '';
+  return list.map(i => {
+    const sec = i.Section || '';
+    const head = sec && sec !== last ? `<tr class="section-row"><td colspan="${cols}">${UI.esc(sec)}</td></tr>` : '';
+    last = sec;
+    return head + render(i);
+  }).join('');
 }
 
 async function agreementForm(existing, subId, onSaved, fixedProjectId) {
@@ -13860,7 +13985,7 @@ async function subBillForm(agreementId, agreementData, onSaved, existing) {
                ? '<br><span class="muted" style="font-weight:400;font-size:11px">up to the agreement’s</span>' : ''}</th>
              <th class="num" style="width:120px">Amount</th>
            </tr></thead>
-           <tbody>${measured.map(i => `
+           <tbody>${linesWithSections(measured, 8, i => `
              <tr data-id="${UI.esc(i.AgreementItemID)}">
                <td>${UI.esc(i.Description)}${i.ItemCode
                  ? ' <span class="muted">· ' + UI.esc(i.ItemCode) + '</span>' : ''}${i.BOQItems
@@ -13892,7 +14017,7 @@ async function subBillForm(agreementId, agreementData, onSaved, existing) {
                <td><input class="input" type="number" step="any" min="0" max="${i.BalanceRate}" data-srate
                           value="${(mineStage[String(i.AgreementItemID)] || {}).rate || i.BalanceRate}"></td>
                <td class="num" data-samt>—</td>
-             </tr>` : ''}`).join('')}</tbody>
+             </tr>` : ''}`)}</tbody>
          </table>
        </div>
        <div id="sheetWarn"></div>` +
@@ -14063,7 +14188,7 @@ async function pageSubBill(root, billId) {
                <th class="num">This bill</th><th class="num">Cumulative</th>
                <th class="num">Rate</th><th class="num">Amount</th>
              </tr></thead>
-             <tbody>${d.items.map(i => `
+             <tbody>${linesWithSections(d.items, 8, i => `
                <tr>
                  <td>${UI.esc(i.Description)}${i.ItemCode
                    ? ' <span class="muted">· ' + UI.esc(i.ItemCode) + '</span>' : ''}${Number(i.BalanceRate) > 0
@@ -14080,7 +14205,7 @@ async function pageSubBill(root, billId) {
                  <td class="num">${cash(i.Rate)}${Number(i.BalanceRate) > 0
                    ? `<div class="muted" style="font-size:11.5px">of ${cash(i.AgreementRate)}</div>` : ''}</td>
                  <td class="num">${cash(i.CurrentAmount)}</td>
-               </tr>`).join('')}</tbody>
+               </tr>`)}</tbody>
              <tfoot><tr>
                <td colspan="7" style="text-align:right">Gross this bill</td>
                <td class="num">${cash(b.GrossAmount)}</td>
@@ -17214,6 +17339,8 @@ const FILTER_DEFS = {
                options: () => [{ value: 'vendor', label: 'Vendors only' }, { value: 'subcontractor', label: 'Subcontractors only' }] },
   subcontractorId: { label: 'Subcontractor', type: 'select', options: o => o.subcontractors || [],
                      placeholder: 'All subcontractors' },
+  // A store (owner, 21 Nov 2026: the stock movement summary).
+  stockRoomId: { label: 'Store', type: 'select', options: o => o.stockRooms || [], placeholder: 'All stores' },
   from:      { label: 'From', type: 'date' },
   to:        { label: 'To', type: 'date' }
 };
@@ -18311,7 +18438,8 @@ const PRINT_BODIES = {
         <thead><tr><th>Description</th><th>Unit</th><th class="r">Rate</th><th class="r">Contract qty</th>
           <th class="r">Previous</th><th class="r">This bill</th><th class="r">Cumulative</th>
           <th class="r">Previous amount</th><th class="r">This bill amount</th><th class="r">Cumulative amount</th></tr></thead>
-        <tbody>${items.map(i => `<tr>
+        <tbody>${items.map((i, k) => (i.Section && i.Section !== (k ? items[k - 1].Section : '')
+          ? `<tr><td colspan="10" style="font-weight:700;background:#f2f2f2">${UI.esc(i.Section)}</td></tr>` : '') + `<tr>
           <td>${UI.esc([i.ItemCode, i.Description].filter(Boolean).join(' — '))}${Number(i.BalanceRate) > 0
             ? `<br><small>Billed at ${n(i.Rate)} of ${n(i.AgreementRate)}; ${n(i.BalanceRate)} per ${UI.esc(i.Unit || 'unit')} balance to bill later</small>` : ''}</td>
           <td>${UI.esc(i.Unit || '')}</td>
@@ -19168,6 +19296,7 @@ PAGES['notifications'] = pageNotifications;
     agreement: 'subcontractors',
     subbill: 'subcontractors',
     payables: 'subcontractors', 'unassigned-payments': 'subcontractors',
+    'stock-adjustments': 'stock',
     'cash-account': 'cash',
     'cash-reports': 'cash',
     'cash-report': 'cash',
