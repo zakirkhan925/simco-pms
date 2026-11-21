@@ -12417,7 +12417,12 @@ async function pageSubcontractor(root, subId) {
       (d.canPayAdvance ? ` <button class="btn" id="subAdvBtn">Record advance</button>` : '') +
       (d.canCreateAgreement ? ` <button class="btn btn-primary" id="newAgrBtn">+ New agreement</button>` : '')) +
     `<div class="stat-grid" style="margin-bottom:16px">
-       ${statTile('Contracted', cash(d.totals.contracted), d.agreements.length + ' agreement(s)')}
+       ${(() => {
+         // Terminated agreements are not counted as contracted (owner, 21 Nov 2026).
+         const ended = d.agreements.filter(a => a.Status === 'Terminated').length;
+         return statTile('Contracted', cash(d.totals.contracted), (d.agreements.length - ended) + ' agreement(s)' +
+           (ended ? ' · ' + ended + ' terminated not counted' : ''));
+       })()}
        ${statTile('Work billed', cash(d.totals.billed), 'gross value approved')}
        ${statTile('Paid', cash(d.totals.paid), '')}
        ${statTile('Outstanding', cash(d.totals.outstanding), 'net of retention')}
@@ -14671,6 +14676,10 @@ async function pageCashAccount(root, accountId) {
           UI.esc(r.Description || '') +
           (r.PayeeName ? ` <span class="muted">· ${UI.esc(r.PayeeName)}</span>` : '') +
           (r.Category ? ` <span class="muted">· ${UI.esc(r.Category)}</span>` : '') +
+          // Where the cash came from (owner, 21 Nov 2026): the bank account and cheque / transfer number.
+          (r.BankAccount || r.Reference
+            ? `<br><span class="muted" style="font-size:12px">${r.BankAccount ? UI.esc(r.BankAccount) : 'Cash in hand'}` +
+              `${r.Reference ? ' · Cheque / ref ' + UI.esc(r.Reference) : ''}</span>` : '') +
           // Spent on another of the custodian's projects (11 Nov 2026).
           (r.ProjectName && String(r.ProjectID) !== String(a.ProjectID)
             ? `<br><span class="chip">${UI.esc(r.ProjectName)}</span>` : '') },
