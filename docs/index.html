@@ -13163,11 +13163,23 @@ function lineGrid(items, units, opts) {
   /** A section heading row: every line below it, up to the next heading, sits under it (21 Nov 2026). */
   const addHead = (text) => {
     const tr = UI.el('tr', { class: 'line-head' });
-    tr.innerHTML = `<td colspan="6"><input class="input" data-h="1" value="${UI.esc(text || '')}"
-        placeholder="Section heading, e.g. Internal Distemper Work (Walls)" style="font-weight:600"></td>
+    tr.innerHTML = `<td colspan="6"><div style="display:flex;gap:6px;align-items:center">
+        <input class="input" data-h="1" value="${UI.esc(text || '')}"
+          placeholder="Section heading, e.g. Internal Distemper Work (Walls)" style="font-weight:600;flex:1">
+        <button class="btn btn-sm" type="button" data-mv="top" title="Move to the top">⇈</button>
+        <button class="btn btn-sm" type="button" data-mv="up" title="Move up one row">↑</button>
+        <button class="btn btn-sm" type="button" data-mv="down" title="Move down one row">↓</button></div></td>
       <td><button class="line-drop" type="button" title="Remove this heading (its lines stay)">×</button></td>`;
     tbody.appendChild(tr);
     tr.querySelector('.line-drop').onclick = () => tr.remove();
+    // Moving a heading (owner, 21 Nov 2026): the lines stay in their order; a heading covers the lines below it.
+    tr.querySelectorAll('[data-mv]').forEach(b => { b.onclick = () => {
+      const mv = b.dataset.mv;
+      if (mv === 'top') tbody.insertBefore(tr, tbody.firstChild);
+      else if (mv === 'up' && tr.previousElementSibling) tbody.insertBefore(tr, tr.previousElementSibling);
+      else if (mv === 'down' && tr.nextElementSibling) tbody.insertBefore(tr.nextElementSibling, tr);
+      tr.querySelector('[data-h]').focus();
+    }; });
     return tr;
   };
   const blank = { ItemCode: '', Description: '', Unit: '', Quantity: '', Rate: '' };
