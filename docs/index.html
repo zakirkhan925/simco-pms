@@ -1823,6 +1823,8 @@ const NAV = [
     { id: 'expenses',       label: 'Expenses',       icon: '◎', phase: 9, perm: 'expense.view' },
     { id: 'subcontractors', label: 'Subcontractors', icon: '⚒', phase: 9, perm: 'subcontract.view' },
     { id: 'cash',           label: 'Working Cash',   icon: '⛁', phase: 13, perm: 'cash.view' },
+    // Tax withheld and its FBR deposits (owner, 23 Nov 2026).
+    { id: 'tax-withheld',   label: 'Tax Withheld',   icon: '%', phase: 9, perm: 'tax.view' },
     { id: 'documents',      label: 'Documents',      icon: '❑', phase: 11, perm: 'project.view' },
     { id: 'reports',        label: 'Reports',        icon: '◳', phase: 10, perm: 'report.view' }
   ]},
@@ -5931,7 +5933,10 @@ async function loadVendorLedger(vendorId) {
            ['Invoiced', UI.fmt.money(s.invoiced, sym)]]
           .concat(s.openingDues ? [['Owed before PMS', UI.fmt.money(s.openingDues, sym)]] : [])
           .concat([
-           ['Paid', UI.fmt.money(s.paid, sym)],
+           ['Paid', UI.fmt.money(s.paid, sym)]])
+          // Tax withheld apart from what was paid (owner, 23 Nov 2026); an older server sends neither.
+          .concat(s.taxWithheld ? [['Tax withheld', UI.fmt.money(s.taxWithheld, sym)]] : [])
+          .concat([
            ['Balance owed', UI.fmt.money(s.closingBalance, sym), 'strong'],
            ['Received, not billed', UI.fmt.money(s.receivedNotInvoiced, sym)]])
           .map(t => `<div class="ledger-figure${t[2] ? ' is-total' : ''}">
@@ -5950,7 +5955,7 @@ async function loadVendorLedger(vendorId) {
           r.opening ? '' : UI.fmt.date(r.date) },
         { key: 'type', label: 'Type', width: '92px', render: r =>
           r.opening ? '' : UI.badge(r.type, r.type === 'Invoice' ? 'amber' : r.type === 'Debit note' ? 'violet'
-            : r.type === 'Opening balance' ? 'blue' : 'green') },
+            : r.type === 'Opening balance' ? 'blue' : r.type === 'Tax withheld' ? 'red' : 'green') },
         { key: 'ref', label: 'Reference', width: '130px', render: r =>
           r.opening ? '' :
           // The reference is what someone reads out on the phone, so it is
@@ -5984,6 +5989,10 @@ async function loadVendorLedger(vendorId) {
             : r.type === 'Debit note'
             ? `<div class="row-actions"><button class="btn btn-sm"
                  data-debitnote="${UI.esc(r.ref)}">Open</button></div>`
+            // Tax withheld is owed to FBR, closed by a CPR on the Tax Withheld ledger (23 Nov 2026).
+            : r.type === 'Tax withheld'
+            ? (can('tax.view') ? `<div class="row-actions"><button class="btn btn-sm btn-ghost"
+                 data-taxledger="${UI.esc(r.ref)}">Tax ledger</button></div>` : '')
             : r.type === 'Opening balance'
             ? (d.canOpening ? `<div class="row-actions"><button class="btn btn-sm btn-ghost"
                  data-cancelob="${UI.esc(r.ref)}">Cancel</button></div>` : '')
@@ -5997,6 +6006,9 @@ async function loadVendorLedger(vendorId) {
     host.querySelectorAll('[data-voucher]').forEach(b => {
       b.onclick = () => printRecord('VENDORPAY', b.dataset.voucher);
     });
+    host.querySelectorAll('[data-taxledger]').forEach(b => {
+      b.onclick = () => navigate('tax-withheld', { search: b.dataset.taxledger });
+    });
     host.querySelectorAll('[data-revpay]').forEach(b => {
       b.onclick = () => {
         const e = d.entries.find(x => x.ref === b.dataset.revpay);
@@ -6004,7 +6016,7 @@ async function loadVendorLedger(vendorId) {
           title: 'Reverse payment ' + e.ref,
           label: 'Why is this being reversed?',
           confirmLabel: 'Reverse payment', danger: true,
-          intro: `<strong>${UI.esc(UI.fmt.money(e.credit, sym))}</strong> paid on ${UI.esc(UI.fmt.date(e.date))}
+          intro: `<strong>${UI.esc(UI.fmt.money(e.gross ?? e.credit, sym))}</strong> paid on ${UI.esc(UI.fmt.date(e.date))}
             goes back onto what is owed to the vendor` + (e.related && /^SINV/.test(e.related)
               ? `, and invoice ${UI.esc(e.related)} is open again for it.` : '.') +
             ' The payment stays on the record marked Reversed — nothing is deleted.',
@@ -6484,7 +6496,7 @@ async function openSetPaymentProject(entry, onSaved) {
   const body = UI.el('div');
   body.innerHTML =
     `<p class="muted" style="margin:0 0 12px;font-size:13px"><strong>${UI.esc(entry.ref)}</strong> · ${UI.esc(entry.document || '')}
-       · ${UI.esc(UI.fmt.date(entry.date))} · <strong>${UI.esc(UI.fmt.money(entry.credit, sym))}</strong>.
+       · ${UI.esc(UI.fmt.date(entry.date))} · <strong>${UI.esc(UI.fmt.money((entry.gross ?? entry.credit), sym))}</strong>.
        Choose its project. If one cheque paid for several projects, split it: the parts must add up to the payment.</p>
      <table class="lines"><thead><tr><th>Project</th><th class="num" style="width:160px">Amount</th><th></th></tr></thead>
        <tbody id="spRows"></tbody></table>
@@ -6497,7 +6509,7 @@ async function openSetPaymentProject(entry, onSaved) {
     const amts = [...tbody.querySelectorAll('[data-amt]')].map(i => Number(i.value || 0));
     const t = amts.reduce((a, b) => a + b, 0);
     body.querySelector('#spSum').textContent = amts.length > 1
-      ? 'Parts: ' + UI.fmt.money(t, sym) + ' of ' + UI.fmt.money(entry.credit, sym) : '';
+      ? 'Parts: ' + UI.fmt.money(t, sym) + ' of ' + UI.fmt.money((entry.gross ?? entry.credit), sym) : '';
   };
   const addRow = (amount) => {
     const tr = UI.el('tr');
@@ -6508,7 +6520,7 @@ async function openSetPaymentProject(entry, onSaved) {
     tr.querySelector('[data-amt]').oninput = sum;
     tr.querySelector('.line-drop').onclick = () => { if (tbody.children.length > 1) { tr.remove(); sum(); } };
   };
-  addRow(entry.credit);
+  addRow((entry.gross ?? entry.credit));
   body.querySelector('#spAdd').onclick = () => { addRow(''); sum(); };
   UI.modal({
     title: 'Set project — ' + entry.ref, body, size: 'wide',
@@ -6557,7 +6569,7 @@ async function openPaymentOnBehalf(entry, onSaved) {
   const sym = App.settings.currencySymbol || 'Rs';
   const body = UI.el('div');
   body.appendChild(UI.el('p', { class: 'muted', style: 'margin:0 0 12px;font-size:13px',
-    text: entry.ref + ' · ' + UI.fmt.date(entry.date) + ' · ' + UI.fmt.money(entry.credit, sym) +
+    text: entry.ref + ' · ' + UI.fmt.date(entry.date) + ' · ' + UI.fmt.money((entry.gross ?? entry.credit), sym) +
       (entry.project ? ' · ' + entry.project : '') }));
   const form = UI.form(fields, { SubcontractorID: entry.onBehalf || '' });
   body.appendChild(form);
@@ -9115,10 +9127,13 @@ ROUTE_PARENTS['purchase-order'] = 'purchase-orders';
    ============================================================= */
 
 const stockState = { page: 1, pageSize: 50, search: '', category: '', stockRoomId: '', projectId: '',
-                     belowMinimumOnly: false, inStockOnly: false, sortBy: 'ItemCode', sortDir: 'asc' };
+                     belowMinimumOnly: false, inStockOnly: false, source: '', sortBy: 'ItemCode', sortDir: 'asc' };
 const itemState = { page: 1, pageSize: 50, search: '', category: '', status: '',
-                    inStockOnly: false, zeroOnly: false, belowMinimumOnly: false,
+                    inStockOnly: false, zeroOnly: false, belowMinimumOnly: false, source: '',
                     sortBy: 'ItemCode', sortDir: 'asc' };
+// Stock and items brought over from IMS (owner, 22 Nov 2026): one click to show them, or leave them out.
+const imsBadge = r => r.FromIMS ? ` <span class="badge badge-violet" title="${r.ImsOpeningQty > 0
+  ? 'IMS opening stock: ' + UI.fmt.number(r.ImsOpeningQty, 3) : 'Item created from IMS'}">IMS</span>` : '';
 const grnState = { page: 1, pageSize: 25, search: '', rejectionsOnly: false,
                    sortBy: 'ReceiptDate', sortDir: 'desc' };
 const issueState = { page: 1, pageSize: 25, search: '', stockRoomId: '', projectId: '',
@@ -9157,6 +9172,12 @@ async function pageStock(root, arg) {
              <select class="input" id="stockRoom"></select></div>
            <div class="field"><label for="stockCategory">Category</label>
              <select class="input" id="stockCategory"></select></div>
+           <div class="field" id="stockSourceField" hidden><label for="stockSource">Source</label>
+             <select class="input" id="stockSource">
+               <option value="">All stock</option>
+               <option value="ims">From IMS</option>
+               <option value="not-ims">Not from IMS</option>
+             </select></div>
            <div class="field"><label>&nbsp;</label>
              <label class="checkbox"><input type="checkbox" id="stockBelowMin"> Below minimum</label></div>
            <div class="field"><label>&nbsp;</label>
@@ -9182,6 +9203,9 @@ async function pageStock(root, arg) {
   document.getElementById('stockCategory').onchange = e => {
     stockState.category = e.target.value; stockState.page = 1; loadStock();
   };
+  const srcSel = document.getElementById('stockSource');
+  srcSel.value = stockState.source;
+  srcSel.onchange = e => { stockState.source = e.target.value; stockState.page = 1; loadStock(); };
   document.getElementById('stockBelowMin').onchange = e => {
     stockState.belowMinimumOnly = e.target.checked; stockState.page = 1; loadStock();
   };
@@ -9190,7 +9214,7 @@ async function pageStock(root, arg) {
   };
   document.getElementById('stockReset').onclick = () => {
     Object.assign(stockState, { page: 1, search: '', category: '', stockRoomId: '',
-      belowMinimumOnly: false, inStockOnly: false });
+      belowMinimumOnly: false, inStockOnly: false, source: '' });
     pageStock(root);
   };
   const bind = (id, fn) => { const b = document.getElementById(id); if (b) b.onclick = fn; };
@@ -9209,6 +9233,7 @@ async function loadStock() {
   mount.innerHTML = UI.loadingState();
   try {
     const d = (await api('listStock', stockState)).data;
+    const sf = document.getElementById('stockSourceField'); if (sf) sf.hidden = !('imsLines' in d.summary);
 
     const catSel = document.getElementById('stockCategory');
     if (catSel && !catSel.options.length) {
@@ -9222,6 +9247,7 @@ async function loadStock() {
        ['Stock value', money(d.summary.value), 'At weighted average rate'],
        ['Below minimum', d.summary.belowMinimum, 'Needs replenishing'],
        ['Out of stock', d.summary.zeroStock, 'Nothing on the shelf']]
+        .concat(d.summary.imsLines ? [['From IMS', d.summary.imsLines, money(d.summary.imsValue) + ' brought over from IMS']] : [])
         .map(t => `<div class="stat"><div class="stat-label">${UI.esc(t[0])}</div>
           <div class="stat-value">${UI.esc(t[1])}</div><div class="stat-note">${UI.esc(t[2])}</div>
           <div class="stat-accent"></div></div>`).join('');
@@ -9235,7 +9261,7 @@ async function loadStock() {
       columns: [
         { key: 'ItemCode', label: 'Item', render: r =>
           `<a href="#" data-ledger="${UI.esc(r.ItemID)}" data-room="${UI.esc(r.StockRoomID)}">
-            <strong class="mono">${UI.esc(r.ItemCode)}</strong></a>
+            <strong class="mono">${UI.esc(r.ItemCode)}</strong></a>${imsBadge(r)}
            <br><span class="muted">${UI.esc(r.ItemName)}</span>` },
         { key: 'StockRoomName', label: 'Store' },
         { key: 'Category', label: 'Category' },
@@ -10715,6 +10741,13 @@ async function pageStockItems(root) {
                <option value="Active">Active</option>
                <option value="Inactive">Inactive</option>
              </select></div>
+           <div class="field" id="itemSourceField" hidden><label for="itemSource">Source</label>
+             <select class="input" id="itemSource">
+               <option value="">All items</option>
+               <option value="ims">From IMS (new or with IMS stock)</option>
+               <option value="ims-new">Created from IMS</option>
+               <option value="not-ims">Not from IMS</option>
+             </select></div>
            <div class="field"><label>&nbsp;</label>
              <label class="checkbox"><input type="checkbox" id="itemInStock"> In stock only</label></div>
            <div class="field"><label>&nbsp;</label>
@@ -10739,6 +10772,9 @@ async function pageStockItems(root) {
   document.getElementById('itemStatus').onchange = e => {
     itemState.status = e.target.value; itemState.page = 1; loadStockItems();
   };
+  const itemSrc = document.getElementById('itemSource');
+  itemSrc.value = itemState.source;
+  itemSrc.onchange = e => { itemState.source = e.target.value; itemState.page = 1; loadStockItems(); };
   document.getElementById('itemInStock').onchange = e => {
     itemState.inStockOnly = e.target.checked;
     if (e.target.checked) { itemState.zeroOnly = false; document.getElementById('itemZero').checked = false; }
@@ -10754,7 +10790,7 @@ async function pageStockItems(root) {
   };
   document.getElementById('itemReset').onclick = () => {
     Object.assign(itemState, { page: 1, search: '', category: '', status: '',
-      inStockOnly: false, zeroOnly: false, belowMinimumOnly: false });
+      inStockOnly: false, zeroOnly: false, belowMinimumOnly: false, source: '' });
     pageStockItems(root);
   };
   const bind = (id, fn) => { const b = document.getElementById(id); if (b) b.onclick = fn; };
@@ -10774,12 +10810,15 @@ async function loadStockItems() {
   mount.innerHTML = UI.loadingState();
   try {
     const d = (await api('listStockItems', itemState)).data;
+    const isf = document.getElementById('itemSourceField'); if (isf) isf.hidden = !('imsItems' in d.summary);
     document.getElementById('itemSummary').innerHTML =
       [['Items', UI.fmt.number(d.summary.items, 0), 'Matching the filters'],
        ['In stock', UI.fmt.number(d.summary.inStock, 0), 'Some quantity on hand'],
        ['No stock', UI.fmt.number(d.summary.zero, 0), 'In the master, none held'],
        ['Below minimum', UI.fmt.number(d.summary.belowMinimum, 0), 'Need reordering'],
        ['Stock value', money(d.summary.value), 'Across all stores']]
+        .concat(d.summary.imsItems ? [['From IMS', UI.fmt.number(d.summary.imsItems, 0),
+          UI.fmt.number(d.summary.imsNew, 0) + ' created from IMS']] : [])
         .map(t => `<div class="stat"><div class="stat-label">${UI.esc(t[0])}</div>
           <div class="stat-value">${UI.esc(t[1])}</div><div class="stat-note">${UI.esc(t[2])}</div>
           <div class="stat-accent"></div></div>`).join('');
@@ -10796,7 +10835,7 @@ async function loadStockItems() {
 
     UI.table(mount, {
       columns: [
-        { key: 'ItemCode', label: 'Code', render: r => `<span class="mono">${UI.esc(r.ItemCode)}</span>` },
+        { key: 'ItemCode', label: 'Code', render: r => `<span class="mono">${UI.esc(r.ItemCode)}</span>${imsBadge(r)}` },
         { key: 'ItemName', label: 'Item', render: r =>
           `<strong>${UI.esc(r.ItemName)}</strong>` +
           (r.Specification ? `<br><span class="muted">${UI.esc(r.Specification)}</span>` : '') },
@@ -15519,6 +15558,280 @@ PAGES['cash-account'] = pageCashAccount;
 PAGES['cash-reports'] = pageCashReports;
 PAGES['cash-report'] = pageCashReport;
 
+/* ============================================================ TAX WITHHELD
+ * Owner, 23 Nov 2026: tax withheld from vendors, subcontractors and salaries
+ * is owed to FBR until it is deposited; a CPR closes the deductions it covers.
+ */
+const taxState = { page: 1, pageSize: 100, search: '', from: '', to: '', projectId: '', sourceType: '',
+                   section: '', status: '', sortBy: 'date', sortDir: 'desc' };
+const taxMoney = v => UI.fmt.money(v, App.settings['company.currencySymbol'] || 'Rs');
+
+async function pageTaxWithheld(root, arg) {
+  if (arg && arg.search) Object.assign(taxState, { page: 1, search: arg.search, status: '' });
+  let projects = [];
+  try { projects = (await api('listProjects', { pageSize: 300 })).data.rows; } catch (e) { projects = []; }
+  root.innerHTML =
+    pageHead('Tax Withheld', 'Deducted from vendors, subcontractors and salaries; owed to FBR until a CPR closes it',
+      `<button class="btn" id="taxExport">Export</button>` +
+      (can('tax.deposit') ? `<button class="btn btn-primary" id="taxDepositBtn">+ Record FBR deposit (CPR)</button>` : '')) +
+    `<div id="taxSummary" class="stat-grid" style="margin-bottom:16px"></div>
+     <div class="card">
+       <div class="card-head">
+         <div class="filters">
+           <div class="field"><label for="taxSearch">Search</label>
+             <input class="input" id="taxSearch" placeholder="Payment, bill, party, CPR" value="${UI.esc(taxState.search)}"></div>
+           <div class="field"><label for="taxFrom">From</label><input class="input" type="date" id="taxFrom" value="${UI.esc(taxState.from)}"></div>
+           <div class="field"><label for="taxTo">To</label><input class="input" type="date" id="taxTo" value="${UI.esc(taxState.to)}"></div>
+           <div class="field"><label for="taxProject">Project</label>
+             <select class="input" id="taxProject"><option value="">All projects</option><option value="HEAD_OFFICE">Head office</option>
+               ${projects.map(p => `<option value="${UI.esc(p.ProjectID)}">${UI.esc(p.ProjectName)}</option>`).join('')}</select></div>
+           <div class="field"><label for="taxSource">From</label>
+             <select class="input" id="taxSource"><option value="">Vendors, subcontractors, salaries</option>
+               <option value="VENDOR">Vendor payments</option><option value="SUBCONTRACTOR">Subcontractor bills</option>
+               <option value="SALARY">Salary sheets</option></select></div>
+           <div class="field"><label for="taxSection">Section</label><select class="input" id="taxSection"></select></div>
+           <div class="field"><label for="taxStatus">Status</label>
+             <select class="input" id="taxStatus"><option value="">All</option>
+               <option value="Pending">Pending deposit</option><option value="Deposited">Deposited (CPR)</option></select></div>
+           <button class="btn" id="taxReset">Reset</button>
+         </div>
+       </div>
+       <div id="taxTable">${UI.loadingState()}</div>
+       <div id="taxPager"></div>
+     </div>
+     <div class="card mt-16">
+       <div class="card-head"><div class="card-title">FBR deposits (CPR)</div></div>
+       <div id="taxDeposits">${UI.loadingState()}</div>
+     </div>`;
+
+  const set = (id, key) => {
+    const el = document.getElementById(id);
+    el.value = taxState[key];
+    el.onchange = e => { taxState[key] = e.target.value; taxState.page = 1; loadTaxWithheld(); };
+  };
+  set('taxFrom', 'from'); set('taxTo', 'to'); set('taxProject', 'projectId'); set('taxSource', 'sourceType');
+  set('taxStatus', 'status');
+  let debounce;
+  document.getElementById('taxSearch').oninput = e => {
+    clearTimeout(debounce);
+    debounce = setTimeout(() => { taxState.search = e.target.value; taxState.page = 1; loadTaxWithheld(); }, 250);
+  };
+  document.getElementById('taxReset').onclick = () => {
+    Object.assign(taxState, { page: 1, search: '', from: '', to: '', projectId: '', sourceType: '', section: '', status: '' });
+    pageTaxWithheld(root);
+  };
+  document.getElementById('taxExport').onclick = exportTaxWithheld;
+  const dep = document.getElementById('taxDepositBtn');
+  if (dep) dep.onclick = () => openTaxDeposit();
+  await loadTaxWithheld();
+}
+
+async function loadTaxWithheld() {
+  const mount = document.getElementById('taxTable');
+  if (!mount) return;
+  mount.innerHTML = UI.loadingState();
+  try {
+    const d = (await api('listTaxWithheld', taxState)).data;
+    const secSel = document.getElementById('taxSection');
+    if (secSel && !secSel.options.length) {
+      secSel.innerHTML = '<option value="">All sections</option>' +
+        d.sections.map(s => `<option value="${UI.esc(s)}">${UI.esc(s)}</option>`).join('');
+      secSel.value = taxState.section;
+      secSel.onchange = e => { taxState.section = e.target.value; taxState.page = 1; loadTaxWithheld(); };
+    }
+    const s = d.summary;
+    document.getElementById('taxSummary').innerHTML =
+      [['Pending deposit', taxMoney(s.pending), s.pendingCount + ' deduction(s) owed to FBR'],
+       ['Deposited', taxMoney(s.deposited), 'Closed by a CPR'],
+       ['Total withheld', taxMoney(s.total), s.entries + ' deduction(s) shown']]
+        .concat(s.bySection.filter(x => x.pending).map(x => [x.section, taxMoney(x.pending), 'Pending under this section']))
+        .map(t => `<div class="stat"><div class="stat-label">${UI.esc(t[0])}</div>
+          <div class="stat-value">${UI.esc(t[1])}</div><div class="stat-note">${UI.esc(t[2])}</div>
+          <div class="stat-accent"></div></div>`).join('');
+
+    UI.table(mount, {
+      sortBy: taxState.sortBy, sortDir: taxState.sortDir,
+      onSort: key => {
+        taxState.sortDir = (taxState.sortBy === key && taxState.sortDir === 'asc') ? 'desc' : 'asc';
+        taxState.sortBy = key; loadTaxWithheld();
+      },
+      columns: [
+        { key: 'date', label: 'Date', render: r => UI.esc(UI.fmt.date(r.date)) },
+        { key: 'sourceId', label: 'Deducted on', render: r =>
+          `<span class="mono">${UI.esc(r.sourceId)}</span><br><span class="muted">${UI.esc(r.source)}</span>` },
+        { key: 'party', label: 'From', render: r =>
+          `${UI.esc(r.party)}` + (r.document ? `<br><span class="muted">${UI.esc(r.document)}</span>` : '') },
+        { key: 'project', label: 'Project' },
+        { key: 'section', label: 'Section', render: r =>
+          UI.esc(r.section) + (r.sectionIsDefault ? ' <span class="muted" title="Not set; this is the default">(default)</span>' : '') +
+          (d.canDeposit && r.status === 'Pending' && r.sourceType !== 'SALARY'
+            ? ` <button class="btn btn-sm btn-ghost" data-sec="${UI.esc(r.key)}">Change</button>` : '') },
+        { key: 'amount', label: 'Tax', align: 'right', render: r => `<strong>${UI.fmt.number(r.amount)}</strong>` },
+        { key: 'status', label: 'Status', render: r => r.status === 'Deposited'
+          ? UI.badge('Deposited', 'green') + `<br><span class="muted">CPR ${UI.esc(r.cprNumber)} · ${UI.esc(UI.fmt.date(r.cprDate))}</span>`
+          : UI.badge('Pending', 'amber') }
+      ],
+      rows: d.rows,
+      empty: UI.emptyState('Nothing here', 'No tax withheld matches these filters.')
+    });
+    mount.querySelectorAll('[data-sec]').forEach(b => {
+      b.onclick = () => openTaxSection(d.rows.find(r => r.key === b.dataset.sec), d.sections);
+    });
+    UI.pager(document.getElementById('taxPager'), {
+      page: d.page, totalPages: d.totalPages, total: d.total, pageSize: d.pageSize,
+      onPage: p => { taxState.page = p; loadTaxWithheld(); }
+    });
+    renderTaxDeposits(d);
+  } catch (e) {
+    mount.innerHTML = UI.errorState(e.message, 'retryTax');
+    const r = document.getElementById('retryTax');
+    if (r) r.onclick = loadTaxWithheld;
+  }
+}
+
+function renderTaxDeposits(d) {
+  const mount = document.getElementById('taxDeposits');
+  if (!mount) return;
+  UI.table(mount, {
+    columns: [
+      { key: 'TaxDepositID', label: 'Deposit', render: r => `<span class="mono">${UI.esc(r.TaxDepositID)}</span>` },
+      { key: 'CPRNumber', label: 'CPR', render: r => `<strong>${UI.esc(r.CPRNumber)}</strong><br>
+          <span class="muted">${UI.esc(UI.fmt.date(r.CPRDate))}</span>` },
+      { key: 'TaxSection', label: 'Section' },
+      { key: 'BankAccount', label: 'Paid from', render: r =>
+        UI.esc([r.Method, r.BankAccount, r.Reference].filter(Boolean).join(' · ')) },
+      { key: 'Items', label: 'Covers', render: r =>
+        `<span class="muted">${UI.esc(r.Items.map(i => i.SourceID).join(', '))}</span>` },
+      { key: 'Amount', label: 'Amount', align: 'right', render: r => `<strong>${UI.fmt.number(r.Amount)}</strong>` },
+      { key: 'Status', label: 'Status', render: r => UI.badge(r.Status, r.Status === 'Deposited' ? 'green' : 'grey') +
+        (r.ReversalReason ? `<br><span class="muted">${UI.esc(r.ReversalReason)}</span>` : '') },
+      { key: 'actions', label: '', align: 'right', render: r => d.canDeposit && r.Status === 'Deposited'
+        ? `<button class="btn btn-sm btn-danger" data-revtax="${UI.esc(r.TaxDepositID)}">Reverse</button>` : '' }
+    ],
+    rows: d.deposits,
+    empty: UI.emptyState('No deposits yet', 'Record a deposit when FBR issues the CPR.')
+  });
+  mount.querySelectorAll('[data-revtax]').forEach(b => {
+    b.onclick = () => {
+      const r = d.deposits.find(x => x.TaxDepositID === b.dataset.revtax);
+      openReasonModal({
+        title: 'Reverse deposit ' + r.TaxDepositID,
+        label: 'Why is this deposit being reversed?',
+        confirmLabel: 'Reverse deposit', danger: true,
+        intro: `CPR <strong>${UI.esc(r.CPRNumber)}</strong> for ${UI.esc(taxMoney(r.Amount))}: its ${r.Items.length}
+          deduction(s) become pending again. The deposit stays on the record marked Reversed.`,
+        onConfirm: async reason => {
+          const res = await api('reverseTaxDeposit', r.TaxDepositID, reason);
+          UI.success('Reversed', res.message);
+          loadTaxWithheld();
+        }
+      });
+    };
+  });
+}
+
+function openTaxSection(row, sections) {
+  const fields = [{ name: 'Section', label: 'Income tax section', type: 'select', required: true,
+    options: sections.filter(s => s !== '149 Salary') }];
+  const form = UI.form(fields, { Section: row.section });
+  UI.modal({
+    title: 'Tax section · ' + row.sourceId, size: 'narrow', body: form,
+    footer: [
+      { label: 'Cancel', onClick: m => m.close() },
+      { label: 'Save', class: 'btn-primary', onClick: async m => {
+          const data = UI.validate(form, fields);
+          if (!data) return;
+          m.busy(true);
+          try {
+            UI.success((await api('setTaxSection', row.sourceType, row.sourceId, data.Section)).message);
+            m.close(); loadTaxWithheld();
+          } catch (e) { m.busy(false); UI.error('Could not change the section', e.message); }
+        } }
+    ]
+  });
+}
+
+/** Record a deposit with FBR: the CPR, and the pending deductions of one section it covers. */
+async function openTaxDeposit() {
+  let all;
+  try { all = (await api('listTaxWithheld', { status: 'Pending', pageSize: 5000, sortBy: 'date', sortDir: 'asc' })).data; }
+  catch (e) { UI.error('Could not load the pending deductions', e.message); return; }
+  const sections = all.sections.filter(s => all.rows.some(r => r.section === s));
+  if (!sections.length) { UI.error('Nothing to deposit', 'There is no tax withheld pending deposit.'); return; }
+  const fields = [
+    { name: 'CPRNumber', label: 'CPR number', required: true },
+    { name: 'CPRDate', label: 'CPR date', type: 'date', required: true, value: new Date().toISOString().slice(0, 10) },
+    { name: 'TaxSection', label: 'Section', type: 'select', required: true, options: sections },
+    { name: 'Method', label: 'Paid by', type: 'select', options: all.bankMethods },
+    ...bankFieldFor(false),
+    { name: 'Reference', label: 'PSID / transfer reference' },
+    { name: 'Amount', label: 'Amount on the CPR', type: 'number', required: true,
+      hint: 'Must equal the deductions ticked below' },
+    { name: 'Remarks', label: 'Remarks', span: 2 }
+  ];
+  const body = UI.el('div');
+  const form = UI.form(fields, { TaxSection: sections[0], Method: 'Online' });
+  body.appendChild(form);
+  const listBox = UI.el('div', { class: 'mt-16' });
+  body.appendChild(listBox);
+  const secEl = form.querySelector('[name="TaxSection"]');
+  const amtEl = form.querySelector('[name="Amount"]');
+  const ticked = new Set();
+  const draw = () => {
+    const rows = all.rows.filter(r => r.section === secEl.value);
+    const total = rows.filter(r => ticked.has(r.key)).reduce((t, r) => t + r.amount, 0);
+    listBox.innerHTML = `
+      <div class="flex gap-8" style="justify-content:space-between;align-items:center;margin-bottom:6px">
+        <strong>Deductions pending under ${UI.esc(secEl.value)}</strong>
+        <span>Ticked: <strong id="taxTicked">${UI.esc(taxMoney(total))}</strong>
+          <button class="btn btn-sm" type="button" id="taxTickAll">Tick all</button></span></div>
+      <div style="max-height:320px;overflow:auto"><table class="table"><thead><tr><th></th><th>Date</th><th>Deducted on</th>
+        <th>From</th><th>Project</th><th style="text-align:right">Tax</th></tr></thead><tbody>
+        ${rows.map(r => `<tr><td><input type="checkbox" data-k="${UI.esc(r.key)}"${ticked.has(r.key) ? ' checked' : ''}></td>
+          <td>${UI.esc(UI.fmt.date(r.date))}</td><td class="mono">${UI.esc(r.sourceId)}</td><td>${UI.esc(r.party)}</td>
+          <td>${UI.esc(r.project)}</td><td style="text-align:right">${UI.fmt.number(r.amount)}</td></tr>`).join('')}
+      </tbody></table></div>`;
+    listBox.querySelectorAll('[data-k]').forEach(c => {
+      c.onchange = () => { c.checked ? ticked.add(c.dataset.k) : ticked.delete(c.dataset.k); draw(); };
+    });
+    listBox.querySelector('#taxTickAll').onclick = () => { rows.forEach(r => ticked.add(r.key)); draw(); };
+    amtEl.value = total ? total.toFixed(2) : '';
+  };
+  secEl.onchange = () => { ticked.clear(); draw(); };
+  draw();
+  UI.modal({
+    title: 'Record FBR deposit (CPR)', size: 'wide', body,
+    footer: [
+      { label: 'Cancel', onClick: m => m.close() },
+      { label: 'Record deposit', class: 'btn-primary', onClick: async m => {
+          const data = UI.validate(form, fields);
+          if (!data) return;
+          data.Items = all.rows.filter(r => ticked.has(r.key) && r.section === data.TaxSection)
+            .map(r => ({ SourceType: r.sourceType, SourceID: r.sourceId }));
+          if (!data.Items.length) { UI.error('Tick the deductions', 'Tick the deductions this CPR covers.'); return; }
+          m.busy(true);
+          try {
+            UI.success('Deposit recorded', (await api('recordTaxDeposit', data)).message);
+            m.close(); loadTaxWithheld();
+          } catch (e) { m.busy(false); UI.error('Could not record the deposit', e.message); }
+        } }
+    ]
+  });
+}
+
+async function exportTaxWithheld() {
+  try {
+    const d = (await api('listTaxWithheld', Object.assign({}, taxState, { page: 1, pageSize: 100000 }))).data;
+    const esc = v => { const t = String(v === undefined || v === null ? '' : v); return /[",\n]/.test(t) ? '"' + t.replace(/"/g, '""') + '"' : t; };
+    const head = ['Date', 'Deducted on', 'Type', 'From', 'Document', 'Project', 'Section', 'Tax', 'Status', 'CPR', 'CPR date', 'Deposit'];
+    const lines = [head.join(',')].concat(d.rows.map(r => [r.date, r.sourceId, r.source, r.party, r.document, r.project,
+      r.section, r.amount, r.status, r.cprNumber, r.cprDate, r.depositId].map(esc).join(',')));
+    downloadCsv('tax_withheld.csv', lines.join('\n'));
+  } catch (e) { UI.error('Could not export', e.message); }
+}
+
+PAGES['tax-withheld'] = pageTaxWithheld;
+
 </script>
 
   <script>
@@ -18548,7 +18861,7 @@ const PRINT_BODIES = {
             <td class="r">${n(e.balance)}</td></tr>`).join('')}
         </tbody>
         <tfoot><tr class="total"><td colspan="4">Balance payable${d.projectId ? ' — ' + UI.esc(d.projectName || d.projectId) : ''}</td>
-          <td class="r">${n(s.invoiced)}</td><td class="r">${n(s.paid)}</td>
+          <td class="r">${n(s.invoiced)}</td><td class="r">${n(s.paid + (s.taxWithheld || 0))}</td>
           <td class="r">${n(s.closingBalance)}</td></tr></tfoot>
       </table>
       ${s.receivedNotInvoiced > 0 ? `<p class="muted" style="margin-top:14px">
