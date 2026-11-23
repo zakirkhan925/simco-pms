@@ -11880,6 +11880,13 @@ async function loadExpenses() {
       ['Draft', 'Submitted', 'Approved', 'Returned', 'Rejected']
         .map(s => `<option${s === expState.status ? ' selected' : ''}>${s}</option>`).join('');
   }
+  // Owner, 23 Nov 2026: the administrator keeps the list of expense categories.
+  const acts = document.getElementById('expActions');
+  if (acts && d.canManageCategories && !document.getElementById('expCatBtn')) {
+    const b = UI.el('button', { class: 'btn', id: 'expCatBtn', text: 'Categories…' });
+    b.onclick = () => expenseCategoriesDialog(() => { const s = document.getElementById('expCategory'); if (s) s.innerHTML = ''; loadExpenses(); });
+    acts.appendChild(b);
+  }
   const catSel = document.getElementById('expCategory');
   if (catSel && !catSel.options.length) {
     catSel.innerHTML = '<option value="">All categories</option>' +
@@ -11947,7 +11954,9 @@ async function expenseForm(existing, onSaved, fixedProjectId) {
       options: projects.map(p => ({ value: p.ProjectID, label: p.ProjectID + ' — ' + p.ProjectName })),
       readonly: !!existing || !!fixedProjectId },
     { name: 'ExpenseDate', label: 'Date', type: 'date', required: true },
-    { name: 'Category', label: 'Category', type: 'select', required: true, options: meta.categories },
+    // A category since removed stays on the expense that carries it.
+    { name: 'Category', label: 'Category', type: 'select', required: true,
+      options: withCurrent(meta.categories || [], existing && existing.Category) },
     { name: 'CostCode', label: 'Cost code', placeholder: 'Optional — ties the spend to a budget line' },
     { name: 'Description', label: 'What was the money spent on', required: true, span: 2 },
     { name: 'Amount', label: 'Amount', type: 'number', required: true },
@@ -14890,6 +14899,8 @@ async function pageCashAccount(root, accountId) {
   if (d.canSpend) actions.push(`<button class="btn btn-primary" id="cashSpendBtn">+ Record payment</button>`);
   // Owner's decision, 23 Oct 2026: a float's name, ceiling, remarks and holder can be changed.
   if (d.canEditFloat) actions.splice(1, 0, `<button class="btn" id="cashEditBtn">Edit float</button>`);
+  // Owner, 23 Nov 2026: the administrator keeps the list of expense categories.
+  if (d.canManageCategories) actions.splice(1, 0, `<button class="btn" id="cashCatBtn">Categories…</button>`);
 
   root.innerHTML =
     pageHead(accountId, UI.esc(a.CustodianName) + ' · ' + UI.esc(a.ProjectName), actions.join(' ')) +
@@ -15002,6 +15013,7 @@ async function pageCashAccount(root, accountId) {
   on('cashEditBtn', () => cashAccountEditDialog(a, !!d.canMoveProject));
   on('cashIssueBtn', () => cashIssueDialog(accountId, p));
   on('cashSpendBtn', () => cashSpendDialog(accountId, d));
+  on('cashCatBtn', () => expenseCategoriesDialog(() => navigate('cash-account', accountId)));
   on('cashTransferBtn', () => cashTransferDialog(accountId, d.balance));
   on('cashReportBtn', () => cashReportDialog(accountId, d));
 }
@@ -15288,7 +15300,9 @@ async function cashEditDialog(txnId, onDone) {
     { name: 'Amount', label: 'Amount', type: 'number', required: true,
       hint: money ? '' : d.amountBlockedBy },
     { name: 'TxnDate', label: 'Date', type: 'date', required: true },
-    { name: 'Category', label: 'Expense category', type: 'select', options: d.categories || [] },
+    // A category since removed stays on the entry that carries it.
+    { name: 'Category', label: 'Expense category', type: 'select',
+      options: withCurrent(d.categories || [], t.Category) },
     { name: 'CostCode', label: 'Cost code' },
     { name: 'PayeeName', label: 'Paid to' },
     { name: 'Description', label: 'What was it for?', type: 'textarea', span: 2 }
@@ -15639,6 +15653,79 @@ PAGES['cash-report'] = pageCashReport;
 const taxState = { page: 1, pageSize: 100, search: '', from: '', to: '', projectId: '', sourceType: '',
                    section: '', status: '', sortBy: 'date', sortDir: 'desc' };
 const taxMoney = v => UI.fmt.money(v, App.settings['company.currencySymbol'] || 'Rs');
+
+/** The list, plus the record's own value if it is no longer on it. */
+function withCurrent(list, current) {
+  return current && list.indexOf(current) === -1 ? list.concat([current]) : list;
+}
+
+/**
+ * Add, rename or remove an expense category: administrator only, each with a
+ * reason (owner, 23 Nov 2026). Removing one stops it being offered; records
+ * that carry it keep it.
+ */
+async function expenseCategoriesDialog(onDone) {
+  let d;
+  try { d = (await api('getExpenseCategories')).data; }
+  catch (e) { UI.error('Could not load the categories', e.message); return; }
+  let changed = false;
+  const body = UI.el('div');
+  const draw = () => {
+    body.innerHTML =
+      `<p class="muted" style="margin-top:0">Offered for site expenses and cash payments. Removing one stops it being offered;
+         the records that already carry it keep it.</p>
+       <table class="table"><thead><tr><th>Category</th><th style="text-align:right">Records</th><th></th></tr></thead><tbody>` +
+      d.categories.map(c => `<tr><td>${UI.esc(c.name)}</td><td style="text-align:right">${c.records}</td>
+        <td style="text-align:right;white-space:nowrap">` + (c.fixed ? '<span class="muted" style="font-size:12px">always kept</span>'
+          : `<button class="btn btn-sm" data-ren="${UI.esc(c.name)}">Rename</button>
+             <button class="btn btn-sm btn-danger" data-rem="${UI.esc(c.name)}">Remove</button>`) + `</td></tr>`).join('') +
+      `</tbody></table>` +
+      (d.retired.length ? `<p class="muted" style="font-size:12px">No longer offered, still on records: ` +
+        d.retired.map(r => UI.esc(r.name) + ' (' + r.records + ')').join(', ') + '</p>' : '') +
+      `<div style="margin-top:12px"><button class="btn btn-primary" id="catAddBtn">+ Add category</button></div>`;
+    body.querySelector('#catAddBtn').onclick = () => change('add', '');
+    body.querySelectorAll('[data-ren]').forEach(b => { b.onclick = () => change('rename', b.dataset.ren); });
+    body.querySelectorAll('[data-rem]').forEach(b => { b.onclick = () => change('remove', b.dataset.rem); });
+  };
+  const change = (action, name) => {
+    const cat = d.categories.find(c => c.name === name);
+    const fields = action === 'add'
+      ? [{ name: 'name', label: 'New category', required: true, span: 2 }]
+      : action === 'rename'
+        ? [{ name: 'newName', label: 'New name for ' + name, required: true, span: 2 },
+           { name: 'applyToRecords', label: 'Also change the ' + (cat ? cat.records : 0) + ' record(s) that carry it', type: 'checkbox', span: 2 }]
+        : [];
+    fields.push({ name: 'reason', label: 'Reason', type: 'textarea', required: true, span: 2 });
+    const inner = UI.el('div');
+    if (action === 'remove') {
+      inner.appendChild(UI.el('p', { class: 'muted', text: name + ' will no longer be offered. The ' + (cat ? cat.records : 0) +
+        ' record(s) that carry it keep it.' }));
+    }
+    const form = UI.form(fields, action === 'rename' ? { newName: name } : {});
+    inner.appendChild(form);
+    UI.modal({ title: action === 'add' ? 'Add a category' : (action === 'rename' ? 'Rename ' : 'Remove ') + name, body: inner, footer: [
+      { label: 'Cancel', onClick: m => m.close() },
+      { label: action === 'remove' ? 'Remove' : 'Save', class: action === 'remove' ? 'btn-danger' : 'btn-primary', onClick: async m => {
+          const v = UI.validate(form, fields); if (!v) return;
+          m.busy(true);
+          try {
+            const r = await api('saveExpenseCategory', { action, name: action === 'add' ? v.name : name, newName: v.newName,
+              applyToRecords: !!v.applyToRecords, reason: v.reason });
+            UI.success(r.message);
+            m.close();
+            changed = true;
+            d = (await api('getExpenseCategories')).data;
+            draw();
+          } catch (e) { m.busy(false); UI.error('Not changed', e.message); }
+        } }
+    ] });
+  };
+  draw();
+  // However it is closed (button, ×, Escape), the page reloads if anything changed.
+  UI.modal({ title: 'Expense categories', size: 'wide', body,
+    onClose: () => { if (changed && onDone) onDone(); },
+    footer: [{ label: 'Close', onClick: m => m.close() }] });
+}
 
 async function pageTaxWithheld(root, arg) {
   if (arg && arg.search) Object.assign(taxState, { page: 1, search: arg.search, status: '' });
