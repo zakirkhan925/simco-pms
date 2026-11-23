@@ -12654,7 +12654,8 @@ async function pageSubcontractor(root, subId) {
         { key: 'Amount', label: 'Amount', align: 'right', render: r => cash(r.Amount) },
         { key: 'Recovered', label: 'Deducted', align: 'right', render: r => r.Recovered ? cash(r.Recovered) : '<span class="muted">–</span>' },
         { key: 'AgreementID', label: 'Recovered through', render: r => r.AgreementID
-            ? `<a href="#" class="link" data-agr="${UI.esc(r.AgreementID)}">${UI.esc(r.AgreementID)}</a>`
+            ? `<a href="#" class="link" data-agr="${UI.esc(r.AgreementID)}">${UI.esc(r.AgreementID)}</a>` +
+              (d.canReassign && !r.Recovered ? ` <button class="linklike" data-obmove="${UI.esc(r.RecoveryNoteID)}">Change</button>` : '')
             : (r.Agreements.length && d.canEdit
                 ? `<button class="btn btn-sm btn-primary" data-obattach="${UI.esc(r.RecoveryNoteID)}">Attach</button>`
                 : `<span class="muted" style="font-size:12px">Waiting for an approved agreement on ${UI.esc(r.ProjectName || 'this project')}</span>`) }
@@ -12662,6 +12663,20 @@ async function pageSubcontractor(root, subId) {
       rows: d.onBehalf
     });
     obHost.querySelectorAll('[data-agr]').forEach(a => { a.onclick = e => { e.preventDefault(); navigate('agreement', a.dataset.agr); }; });
+    obHost.querySelectorAll('[data-obmove]').forEach(b => { b.onclick = () => {
+      const r = d.onBehalf.find(x => x.RecoveryNoteID === b.dataset.obmove);
+      reassignDialog({
+        title: 'Change agreement for ' + r.VendorPaymentID,
+        lead: r.VendorPaymentID + ': ' + cash(r.Amount) + ' paid ' + UI.fmt.date(r.PaymentDate) + ' to ' + (r.VendorName || 'his supplier') +
+          ' on ' + (r.ProjectName || r.ProjectID) + ', now recovered through ' + r.AgreementID + '.',
+        current: r.AgreementID,
+        options: r.Agreements.map(a => ({ value: a.AgreementID, label: a.AgreementNumber + (a.Scope ? ' — ' + a.Scope : '') +
+          (a.Status !== 'Active' ? ' (' + a.Status + ')' : '') })),
+        detachLabel: 'None: back to Unassigned payments',
+        save: (to, reason) => api('reassignOnBehalfRecovery', r.RecoveryNoteID, to, reason),
+        onDone: () => navigate('subcontractor', subId)
+      });
+    }; });
     obHost.querySelectorAll('[data-obattach]').forEach(b => { b.onclick = () => {
       const r = d.onBehalf.find(x => x.RecoveryNoteID === b.dataset.obattach);
       const f = [{ name: 'AgreementID', label: 'Recover through', type: 'select', required: true, span: 2,
@@ -12699,7 +12714,8 @@ async function pageSubcontractor(root, subId) {
         { key: 'Remarks', label: 'For' },
         { key: 'AgreementID', label: 'Recovered through', render: r => r.AgreementID
             ? `<a href="#" class="link" data-agr="${r.AgreementID}">` +
-              UI.esc(r.AgreementNumber || r.AgreementID) + '</a>'
+              UI.esc(r.AgreementNumber || r.AgreementID) + '</a>' +
+              (d.canReassign ? ` <button class="linklike" data-advmove="${UI.esc(r.SubPaymentID)}">Change</button>` : '')
             : (d.canEdit
                 ? `<button class="linklike" data-tag="${r.SubPaymentID}">Attach to agreement</button>`
                 : '<span class="muted">Not on an agreement</span>') },
@@ -12714,6 +12730,21 @@ async function pageSubcontractor(root, subId) {
     });
     advHost.querySelectorAll('[data-tag]').forEach(b => {
       b.onclick = () => tagAdvanceDialog(b.dataset.tag, d, () => navigate('subcontractor', subId));
+    });
+    advHost.querySelectorAll('[data-advmove]').forEach(b => {
+      const a = d.advances.find(x => x.SubPaymentID === b.dataset.advmove);
+      b.onclick = () => reassignDialog({
+        title: 'Change agreement for ' + a.SubPaymentID,
+        lead: a.SubPaymentID + ': ' + cash(a.Amount) + ' paid ' + a.PaymentDate + ' on ' + (a.ProjectName || a.ProjectID) +
+          ', now recovered through ' + (a.AgreementNumber || a.AgreementID) + '.',
+        current: a.AgreementID,
+        options: (d.agreements || []).filter(g => String(g.ProjectID) === String(a.ProjectID) && g.AgreementID !== a.AgreementID)
+          .map(g => ({ value: g.AgreementID, label: (g.AgreementNumber || g.AgreementID) + ' — ' + cash(g.ContractValue) +
+            (g.Scope ? ' · ' + g.Scope : '') + (g.Status !== 'Active' ? ' (' + g.Status + ')' : '') })),
+        detachLabel: 'None: not on any agreement',
+        save: (to, reason) => api('tagSubcontractorAdvance', a.SubPaymentID, to, reason),
+        onDone: () => navigate('subcontractor', subId)
+      });
     });
     advHost.querySelectorAll('[data-voucher]').forEach(b => {
       b.onclick = () => printRecord('SUBPAY', b.dataset.voucher);
@@ -12849,6 +12880,40 @@ async function exportSubLedger(subId) {
     downloadCsv(`${d.subcontractor.CompanyName.replace(/[^A-Za-z0-9]+/g, '_')}` +
       `${d.agreement ? '_' + d.agreement.AgreementID : ''}_ledger.csv`, lines.join('\n'));
   } catch (e) { UI.error('Could not export the ledger', e.message); }
+}
+
+/**
+ * Moves an advance or an on-behalf payment already on an agreement to another
+ * one, or takes it off: administrator only, with a reason (owner, 23 Nov 2026).
+ * The server refuses once a bill has deducted it.
+ */
+function reassignDialog(o) {
+  const NONE = '__none__';
+  const fields = [
+    { name: 'AgreementID', label: 'Recover through', type: 'select', required: true, span: 2,
+      options: [...o.options, { value: NONE, label: o.detachLabel }] },
+    { name: 'Reason', label: 'Reason', type: 'textarea', required: true, span: 2 }
+  ];
+  const body = UI.el('div');
+  body.appendChild(UI.el('p', { class: 'muted', text: o.lead + ' Once a bill has deducted it, it can no longer be moved.' }));
+  const form = UI.form(fields, {});
+  body.appendChild(form);
+  UI.modal({
+    title: o.title, body,
+    footer: [
+      { label: 'Cancel', onClick: m => m.close() },
+      { label: 'Change', class: 'btn-primary', onClick: async m => {
+          const v = UI.validate(form, fields);
+          if (!v) return;
+          m.busy(true);
+          try {
+            UI.success((await o.save(v.AgreementID === NONE ? '' : v.AgreementID, v.Reason)).message);
+            m.close();
+            o.onDone();
+          } catch (e) { m.busy(false); UI.error('Not changed', e.message); }
+        } }
+    ]
+  });
 }
 
 /**
