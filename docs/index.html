@@ -12629,7 +12629,7 @@ async function pageSubcontractor(root, subId) {
       { key: 'RateBasis', label: 'Rate basis', width: '110px', render: r => r.RateBasis
           ? UI.badge(r.RateBasis, r.RateBasis === 'With material' ? 'blue' : 'grey')
           : '<span class="muted">Not stated</span>' },
-      { key: 'ContractValue', label: 'Value', align: 'right', render: r => cash(r.ContractValue) },
+      { key: 'ContractValue', label: 'Value', align: 'right', render: r => agreementValueCell(r) },
       { key: 'BilledValue', label: 'Billed', align: 'right', render: r => cash(r.BilledValue) },
       { key: 'Outstanding', label: 'Outstanding', align: 'right', render: r => cash(r.Outstanding) },
       { key: 'Status', label: 'Status', width: '100px', render: r => UI.badge(r.Status, AGREEMENT_TONE[r.Status]) }
@@ -12883,6 +12883,15 @@ async function exportSubLedger(subId) {
 }
 
 /**
+ * A terminated agreement's value, struck through and greyed: kept as the record
+ * of what was agreed, counted in no total (owner, 23 Nov 2026).
+ */
+function agreementValueCell(r) {
+  if (r.Status !== 'Terminated') return cash(r.ContractValue);
+  return `<span class="muted" style="text-decoration:line-through" title="Terminated: not counted as contracted">${cash(r.ContractValue)}</span>`;
+}
+
+/**
  * Moves an advance or an on-behalf payment already on an agreement to another
  * one, or takes it off: administrator only, with a reason (owner, 23 Nov 2026).
  * The server refuses once a bill has deducted it.
@@ -13035,7 +13044,7 @@ async function loadAgreements() {
       { key: 'RateBasis', label: 'Rate basis', width: '110px', render: r => r.RateBasis
           ? UI.badge(r.RateBasis, r.RateBasis === 'With material' ? 'blue' : 'grey')
           : '<span class="muted">Not stated</span>' },
-      { key: 'ContractValue', label: 'Value', align: 'right', render: r => cash(r.ContractValue) },
+      { key: 'ContractValue', label: 'Value', align: 'right', render: r => agreementValueCell(r) },
       { key: 'BilledValue', label: 'Billed', align: 'right', render: r => cash(r.BilledValue) },
       { key: 'RemainingValue', label: 'Remaining', align: 'right', render: r => cash(r.RemainingValue) },
       { key: 'AdvancePaid', label: 'Advance', align: 'right', render: r =>
