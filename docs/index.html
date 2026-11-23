@@ -2821,9 +2821,14 @@ async function pageUsers(root) {
      </div>`;
 
   const roleSel = document.getElementById('uRole');
+  // Every role the database holds, including those made in the app (QS, HO_ACCOUNTANT, ...),
+  // not only the six in the code (owner, 23 Nov 2026).
+  const roleList = (App.roles && App.roles.length) ? App.roles
+    : ['ADMIN', 'MANAGEMENT', 'PROJECT_MANAGER', 'STOCK_SUPERVISOR', 'PURCHASE', 'SITE_ACCOUNTANT']
+        .map(r => ({ RoleID: r, RoleName: r.replace(/_/g, ' ') }));
   roleSel.innerHTML = '<option value="">All roles</option>' +
-    ['ADMIN', 'MANAGEMENT', 'PROJECT_MANAGER', 'STOCK_SUPERVISOR', 'PURCHASE']
-      .map(r => `<option value="${r}">${r.replace(/_/g, ' ')}</option>`).join('');
+    roleList.slice().sort((a, b) => String(a.RoleName || a.RoleID).localeCompare(String(b.RoleName || b.RoleID)))
+      .map(r => `<option value="${UI.esc(r.RoleID)}">${UI.esc(r.RoleName || r.RoleID)}</option>`).join('');
   roleSel.value = userState.role;
   document.getElementById('uStatus').value = userState.status;
 
