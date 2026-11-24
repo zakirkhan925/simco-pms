@@ -2646,7 +2646,9 @@ function queueHtml(rows) {
     const old = r.ageDays >= 7;
     return `<li>
       <div class="queue-main">
-        <div class="queue-title">${UI.esc(r.ref)}</div>
+        <div class="queue-title">${r.open && r.id
+          ? `<a href="#" class="link" data-go="${UI.esc(r.open)}" data-id="${UI.esc(r.id)}">${UI.esc(r.ref)}</a>`
+          : UI.esc(r.ref)}</div>
         <div class="queue-sub">${r.party ? '<strong>' + UI.esc(r.party) + '</strong> · ' : ''}${UI.esc(r.what)}${r.project ? ', ' + UI.esc(r.project) : ''}</div>
       </div>
       <div class="queue-amount">${r.amount ? UI.fmt.money(r.amount, App.settings.currencySymbol || 'Rs') : ''}</div>
@@ -2656,10 +2658,10 @@ function queueHtml(rows) {
   }).join('')}</ul>`;
 }
 
-/** Each item's button opens the item itself (owner, 24 Nov 2026), not the list it sits in. */
+/** Each item's button, and its number, open the item itself (owner, 24 Nov 2026), not the list it sits in. */
 function wireQueue(host) {
-  host.querySelectorAll('button[data-go]').forEach(b => {
-    b.onclick = () => b.dataset.id ? navigate(b.dataset.go, b.dataset.id) : navigate(b.dataset.go);
+  host.querySelectorAll('[data-go]').forEach(b => {
+    b.onclick = e => { e.preventDefault(); b.dataset.id ? navigate(b.dataset.go, b.dataset.id) : navigate(b.dataset.go); };
   });
 }
 
