@@ -15871,11 +15871,16 @@ function renderTaxDeposits(d) {
       { key: 'Amount', label: 'Amount', align: 'right', render: r => `<strong>${UI.fmt.number(r.Amount)}</strong>` },
       { key: 'Status', label: 'Status', render: r => UI.badge(r.Status, r.Status === 'Deposited' ? 'green' : 'grey') +
         (r.ReversalReason ? `<br><span class="muted">${UI.esc(r.ReversalReason)}</span>` : '') },
-      { key: 'actions', label: '', align: 'right', render: r => d.canDeposit && r.Status === 'Deposited'
-        ? `<button class="btn btn-sm btn-danger" data-revtax="${UI.esc(r.TaxDepositID)}">Reverse</button>` : '' }
+      { key: 'actions', label: '', align: 'right', render: r =>
+        `<button class="btn btn-sm" data-prtax="${UI.esc(r.TaxDepositID)}">Print</button>` +
+        (d.canDeposit && r.Status === 'Deposited'
+          ? ` <button class="btn btn-sm btn-danger" data-revtax="${UI.esc(r.TaxDepositID)}">Reverse</button>` : '') }
     ],
     rows: d.deposits,
     empty: UI.emptyState('No deposits yet', 'Record a deposit when FBR issues the CPR.')
+  });
+  mount.querySelectorAll('[data-prtax]').forEach(b => {
+    b.onclick = () => printTaxDeposit(d.deposits.find(x => x.TaxDepositID === b.dataset.prtax));
   });
   mount.querySelectorAll('[data-revtax]').forEach(b => {
     b.onclick = () => {
@@ -15894,6 +15899,48 @@ function renderTaxDeposits(d) {
       });
     };
   });
+}
+
+/**
+ * The deposit on paper (owner, 23 Nov 2026): the CPR, how it was paid, and each deduction it closed with
+ * who it was deducted from. Page only; the details come from the same list the screen reads.
+ */
+async function printTaxDeposit(dep) {
+  if (!dep) return;
+  let rows = [];
+  try {
+    rows = (await api('listTaxWithheld', { status: 'Deposited', pageSize: 100000, sortBy: 'date', sortDir: 'asc' })).data.rows
+      .filter(r => r.depositId === dep.TaxDepositID);
+  } catch (e) { UI.error('Cannot print', e.message); return; }
+  const n = v => UI.fmt.number(v, 2);
+  const byKey = new Map(rows.map(r => [r.sourceType + ':' + r.sourceId, r]));
+  const lines = dep.Items.map(i => Object.assign({ SourceID: i.SourceID, Amount: i.Amount },
+    byKey.get(i.SourceType + ':' + i.SourceID) || {}));
+  const total = lines.reduce((t, l) => t + (Number(l.Amount) || 0), 0);
+  const body = `
+    <dl class="kv">
+      <dt>CPR number</dt><dd>${UI.esc(dep.CPRNumber)}</dd>
+      <dt>CPR date</dt><dd>${UI.esc(UI.fmt.date(dep.CPRDate))}</dd>
+      <dt>Income tax section</dt><dd>${UI.esc(dep.TaxSection)}</dd>
+      <dt>Paid by</dt><dd>${UI.esc([dep.Method, dep.BankAccount].filter(Boolean).join(' · ') || '—')}</dd>
+      ${dep.Reference ? `<dt>PSID / reference</dt><dd>${UI.esc(dep.Reference)}</dd>` : ''}
+      <dt>Amount deposited</dt><dd>Rs ${UI.esc(n(dep.Amount))}</dd>
+      <dt>Status</dt><dd>${UI.esc(dep.Status)}${dep.ReversalReason ? ' — ' + UI.esc(dep.ReversalReason) : ''}</dd>
+      ${dep.Remarks ? `<dt>Remarks</dt><dd>${UI.esc(dep.Remarks)}</dd>` : ''}
+    </dl>
+    <table><thead><tr><th>#</th><th>Date</th><th>Deducted on</th><th>From</th><th>Document</th><th>Project</th>
+      <th class="r">Tax</th></tr></thead>
+      <tbody>${lines.map((l, i) => `<tr><td>${i + 1}</td><td>${UI.esc(l.date ? UI.fmt.date(l.date) : '')}</td>
+        <td>${UI.esc(l.SourceID)}${l.source ? '<br><span class="muted">' + UI.esc(l.source) + '</span>' : ''}</td>
+        <td>${UI.esc(l.party || '')}</td><td>${UI.esc(l.document || '')}</td><td>${UI.esc(l.project || '')}</td>
+        <td class="r">${n(l.Amount)}</td></tr>`).join('')}</tbody>
+      <tfoot><tr><td colspan="6">Total (${lines.length} deduction${lines.length === 1 ? '' : 's'})</td>
+        <td class="r">${n(total)}</td></tr></tfoot>
+    </table>`;
+  UI.print.send(UI.print.page({
+    title: 'FBR tax deposit', ref: dep.TaxDepositID, meta: ['CPR ' + dep.CPRNumber],
+    styles: UI.print.docStyles(), signatures: ['Prepared by', 'Checked by', 'Approved by'], body
+  }));
 }
 
 function openTaxSection(row, sections) {
