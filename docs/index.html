@@ -399,6 +399,8 @@ table td .input[data-f=CurrentQty]{min-width:96px}
 .ss-opt.active,.ss-opt:hover{background:var(--navy-soft)}
 .ss-opt.chosen{font-weight:600}
 .ss-note{padding:7px 11px;font-size:12px;color:var(--text-muted)}
+.ss-opt.ss-blank{color:var(--text-muted)}
+.filters .ss-wrap,.field .ss-wrap{width:100%}
 .tabs{display:flex;gap:2px;border-bottom:1px solid var(--border);margin-bottom:16px;overflow-x:auto}
 .tab{padding:9px 14px;border:0;background:none;color:var(--text-muted);font-size:13.5px;
   font-weight:550;cursor:pointer;border-bottom:2px solid transparent;white-space:nowrap}
@@ -1539,17 +1541,26 @@ const UI = (() => {
 
 /**
  * Type-to-search for a long drop-down (owner's request, 10 Nov 2026: the item
- * master has over a thousand items). The <select> stays in the page, hidden,
- * and keeps the value, so everything that reads or listens to it still works.
- * Every word typed must appear (code or name, any order); up/down and Enter
- * choose; Esc puts back what was chosen.
+ * master has over a thousand items; 24 Nov 2026: "every drop down like vendor,
+ * subcontractor, project ... type and search"). The <select> stays in the page,
+ * hidden, and keeps the value, so everything that reads or listens to it still
+ * works. Every word typed must appear (code or name, any order); up/down and
+ * Enter choose; Esc puts back what was chosen. The choices are read from the
+ * <select> each time the list opens, so a list filled or refilled later is
+ * searched as it now stands; a value set by code shows at once.
  */
 function makeSearchable(sel, opts) {
-  if (!sel || sel.dataset.searchable) return;
+  if (!sel || sel.dataset.searchable || !sel.parentNode) return;
   opts = opts || {};
   sel.dataset.searchable = '1';
-  const items = [...sel.options].map(o => ({ value: o.value, label: o.textContent.replace(/\s+/g, ' ').trim() }))
-    .map(i => Object.assign(i, { lc: i.label.toLowerCase() }));
+  const clean = t => String(t || '').replace(/\s+/g, ' ').trim();
+  let items = [];
+  const readItems = () => {
+    items = [...sel.options].filter(o => !o.disabled || o.value === '')
+      .map(o => ({ value: o.value, label: clean(o.textContent) }))
+      .map(i => Object.assign(i, { lc: i.label.toLowerCase() }));
+  };
+  readItems();
   const wrap = document.createElement('div');
   wrap.className = 'ss-wrap';
   const input = document.createElement('input');
@@ -1557,15 +1568,36 @@ function makeSearchable(sel, opts) {
   input.type = 'text';
   input.autocomplete = 'off';
   input.spellcheck = false;
-  input.placeholder = opts.placeholder || 'Type to search…';
   sel.parentNode.insertBefore(wrap, sel);
   wrap.appendChild(input);
   wrap.appendChild(sel);
   sel.style.display = 'none';
-  const chosenLabel = () => { const o = sel.options[sel.selectedIndex]; return o && o.value ? o.textContent.replace(/\s+/g, ' ').trim() : ''; };
-  const showChosen = () => { input.value = chosenLabel(); input.title = input.value; };
+  // The blank choice ("All vendors", "Choose…") is what the box says when nothing is chosen.
+  const blankLabel = () => { const o = [...sel.options].find(x => x.value === ''); return o ? clean(o.textContent) : ''; };
+  const chosenLabel = () => { const o = sel.options[sel.selectedIndex]; return o && o.value ? clean(o.textContent) : ''; };
+  const showChosen = () => {
+    input.value = chosenLabel();
+    input.placeholder = blankLabel() || opts.placeholder || 'Type to search…';
+    input.title = input.value || input.placeholder;
+    input.disabled = sel.disabled;
+  };
   showChosen();
   sel.addEventListener('change', showChosen);
+  // A value set by code (filters restored, a form filled) shows in the box at once.
+  ['value', 'selectedIndex'].forEach(p => {
+    const d = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, p);
+    Object.defineProperty(sel, p, { configurable: true, get() { return d.get.call(this); },
+      set(v) { d.set.call(this, v); showChosen(); } });
+  });
+  // Options refilled, or the drop-down disabled, later on.
+  new MutationObserver(() => { readItems(); showChosen(); })
+    .observe(sel, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ['disabled'] });
+  // Its label still leads to it.
+  if (sel.id) {
+    document.querySelectorAll('label[for="' + sel.id.replace(/"/g, '') + '"]').forEach(l => {
+      l.addEventListener('click', e => { e.preventDefault(); input.focus(); });
+    });
+  }
 
   let list = null, hits = [], active = 0;
   const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
@@ -1574,7 +1606,7 @@ function makeSearchable(sel, opts) {
     const r = input.getBoundingClientRect();
     const below = window.innerHeight - r.bottom, above = r.top;
     list.style.left = Math.max(4, Math.min(r.left, window.innerWidth - Math.max(r.width, 340) - 4)) + 'px';
-    list.style.width = Math.max(r.width, 340) + 'px';
+    list.style.width = Math.min(Math.max(r.width, 340), window.innerWidth - 8) + 'px';
     if (below < 240 && above > below) {
       list.style.top = ''; list.style.bottom = (window.innerHeight - r.top + 2) + 'px';
       list.style.maxHeight = Math.min(320, above - 12) + 'px';
@@ -1585,25 +1617,30 @@ function makeSearchable(sel, opts) {
   };
   const render = q => {
     const words = String(q || '').toLowerCase().split(/\s+/).filter(Boolean);
-    const all = items.filter(i => i.value !== '' && words.every(w => i.lc.indexOf(w) !== -1));
+    // With nothing typed the blank choice ("All projects") is offered first, so a filter can be cleared.
+    const all = items.filter(i => (i.value !== '' || !words.length) && words.every(w => i.lc.indexOf(w) !== -1));
     hits = all.slice(0, 150);
     if (active >= hits.length) active = Math.max(0, hits.length - 1);
     const mark = label => {
       let out = esc(label);
-      words.forEach(w => { out = out.replace(new RegExp('(' + w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + ')', 'ig'), '<b>$1</b>'); });
+      words.forEach(w => { out = out.replace(new RegExp('(' + esc(w).replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + ')', 'ig'), '<b>$1</b>'); });
       return out;
     };
     list.innerHTML = hits.length
-      ? hits.map((h, k) => `<div class="ss-opt${k === active ? ' active' : ''}${h.value === sel.value ? ' chosen' : ''}" data-k="${k}">${mark(h.label)}</div>`).join('') +
+      ? hits.map((h, k) => `<div class="ss-opt${k === active ? ' active' : ''}${h.value === sel.value ? ' chosen' : ''}${h.value === '' ? ' ss-blank' : ''}" data-k="${k}">${mark(h.label || '—')}</div>`).join('') +
         (all.length > hits.length ? `<div class="ss-note">${all.length - hits.length} more — keep typing to narrow it down</div>` : '')
       : `<div class="ss-note">Nothing matches “${esc(q)}”</div>`;
   };
   const close = () => {
     if (list) { list.remove(); list = null; }
-    window.removeEventListener('scroll', place, true);
+    window.removeEventListener('scroll', onScroll, true);
     window.removeEventListener('resize', place);
   };
+  // Scrolling the list itself must not close or move it.
+  const onScroll = e => { if (list && e.target !== list) place(); };
   const open = () => {
+    if (sel.disabled) return;
+    readItems();
     if (!list) {
       list = document.createElement('div');
       list.className = 'ss-list';
@@ -1613,17 +1650,20 @@ function makeSearchable(sel, opts) {
         const o = e.target.closest('.ss-opt');
         if (o) choose(hits[Number(o.dataset.k)]);
       });
-      window.addEventListener('scroll', place, true);
+      window.addEventListener('scroll', onScroll, true);
       window.addEventListener('resize', place);
     }
-    active = 0;
+    active = Math.max(0, items.findIndex(i => i.value === sel.value));
     render(input.value === chosenLabel() ? '' : input.value);
     place();
+    const el = list.querySelector('.ss-opt.active');
+    if (el) el.scrollIntoView({ block: 'nearest' });
   };
   const choose = h => {
     if (!h) return;
+    const changed = sel.value !== h.value;
     sel.value = h.value;
-    sel.dispatchEvent(new Event('change', { bubbles: true }));
+    if (changed) sel.dispatchEvent(new Event('change', { bubbles: true }));
     showChosen();
     close();
   };
@@ -1652,6 +1692,41 @@ function makeSearchable(sel, opts) {
     close(); showChosen();
   }, 120));
 }
+
+/**
+ * Every long drop-down becomes searchable by itself (owner, 24 Nov 2026), wherever
+ * a screen or dialog puts it, without touching the screens: a single choice with
+ * SEARCHABLE_MIN or more options (vendors, subcontractors, projects, floats,
+ * agreements, items, accounts...). Short lists (status, method) stay as they are;
+ * so do drop-downs inside table rows (line grids, where the width matters), a
+ * multiple choice, and any marked data-plain.
+ */
+const SEARCHABLE_MIN = 8;
+function autoSearchable(sel) {
+  if (!sel || sel.tagName !== 'SELECT' || sel.dataset.searchable || sel.multiple || sel.size > 1) return;
+  if (sel.hasAttribute('data-plain') || !sel.isConnected || sel.closest('td, th, .ss-list')) return;
+  if (sel.options.length < SEARCHABLE_MIN) return;
+  makeSearchable(sel);
+}
+(function watchDropDowns() {
+  const scan = root => {
+    if (!root || root.nodeType !== 1) return;
+    if (root.tagName === 'SELECT') autoSearchable(root);
+    else if (root.querySelectorAll) root.querySelectorAll('select').forEach(autoSearchable);
+  };
+  const start = () => {
+    scan(document.body);
+    new MutationObserver(list => {
+      list.forEach(m => {
+        // A drop-down filled after it was placed (its options arrive from the server).
+        if (m.target && m.target.tagName === 'SELECT') autoSearchable(m.target);
+        else if (m.target && m.target.parentNode && m.target.parentNode.tagName === 'SELECT') autoSearchable(m.target.parentNode);
+        m.addedNodes.forEach(scan);
+      });
+    }).observe(document.body, { childList: true, subtree: true });
+  };
+  if (document.body) start(); else document.addEventListener('DOMContentLoaded', start);
+})();
 </script>
 
   <script>
