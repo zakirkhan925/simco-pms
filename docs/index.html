@@ -14385,6 +14385,8 @@ async function pageSubBill(root, billId) {
   if (d.canReverseApproval) {
     actions.push(`<button class="btn btn-danger" id="sbUnapprove">Reverse approval</button>`);
   }
+  // An administrator corrects the advance recovery on an approved bill (24 Nov 2026); the server sends this only to one.
+  if (d.advanceCorrection) actions.push(`<button class="btn" id="sbAdvFix">Correct advance recovery</button>`);
   if (d.canPay) actions.push(`<button class="btn btn-primary" id="sbPay">Record payment</button>`);
 
   root.innerHTML =
@@ -14526,6 +14528,7 @@ async function pageSubBill(root, billId) {
       subBillForm(d.bill.AgreementID, ag, () => navigate('subbill', billId), d);
     } catch (e) { UI.error('Could not open the bill for editing', e.message); }
   });
+  on('sbAdvFix', () => subBillAdvanceDialog(billId, d));
   on('sbUnapprove', () => openReasonModal({
     title: 'Reverse the approval of ' + billId,
     label: 'Why is the approval being reversed?',
@@ -14542,6 +14545,53 @@ async function pageSubBill(root, billId) {
   }));
 }
 
+
+/**
+ * Correct the advance recovery on an approved bill (administrator, 24 Nov 2026): only the
+ * recovery changes, net payable moves by the difference, payments already made stand.
+ */
+function subBillAdvanceDialog(billId, d) {
+  const c = d.advanceCorrection, b = d.bill;
+  const fields = [
+    { name: 'Amount', label: 'Advance recovery on this bill', type: 'number', required: true,
+      hint: `At most ${cash(c.max)}` + (c.byPaid < c.byAdvance
+        ? ` — ${cash(c.paid)} is already paid on this bill` : ` — the advance still to recover on ${UI.esc(b.AgreementID)}`) },
+    { name: 'Reason', label: 'Reason', type: 'textarea', required: true, span: 2 }
+  ];
+  const body = UI.el('div');
+  const intro = UI.el('p', { class: 'muted', style: 'margin-top:0' });
+  body.appendChild(intro);
+  const form = UI.form(fields, { Amount: c.own });
+  body.appendChild(form);
+  const amt = form.querySelector('[name="Amount"]');
+  const draw = () => {
+    const v = Number(amt.value);
+    const net = Number(b.NetPayable) + Number(c.own) - (isNaN(v) ? 0 : v);
+    intro.innerHTML = `Now <strong>${cash(c.own)}</strong> recovered, net payable <strong>${cash(b.NetPayable)}</strong>,
+      paid <strong>${cash(c.paid)}</strong>. With <strong>${cash(isNaN(v) ? 0 : v)}</strong> recovered, net payable becomes
+      <strong>${cash(net)}</strong> and <strong>${cash(Math.max(0, net - Number(c.paid)))}</strong> is left to pay.
+      Gross, retention and tax do not change.`;
+  };
+  amt.oninput = draw;
+  draw();
+  UI.modal({
+    title: 'Correct advance recovery · ' + billId, body,
+    footer: [
+      { label: 'Cancel', onClick: m => m.close() },
+      { label: 'Save correction', class: 'btn-primary', onClick: async m => {
+          const v = UI.validate(form, fields);
+          if (!v) return;
+          m.busy(true);
+          try {
+            const res = await api('correctSubBillAdvanceRecovery', billId, Number(v.Amount), v.Reason);
+            UI.success('Advance recovery corrected', res.message);
+            m.close();
+            navigate('subbill', billId);
+          } catch (e) { m.busy(false); UI.error('Could not correct the advance recovery', e.message); }
+        } }
+    ]
+  });
+}
 
 function decideSubBillDialog(billId, action) {
   const verb = { APPROVE: 'Approve', RETURN: 'Return for correction', REJECT: 'Reject' }[action];
