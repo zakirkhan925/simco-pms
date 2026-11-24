@@ -2647,13 +2647,50 @@ function queueHtml(rows) {
     return `<li>
       <div class="queue-main">
         <div class="queue-title">${UI.esc(r.ref)}</div>
-        <div class="queue-sub">${UI.esc(r.what)}${r.project ? ', ' + UI.esc(r.project) : ''}</div>
+        <div class="queue-sub">${r.party ? '<strong>' + UI.esc(r.party) + '</strong> · ' : ''}${UI.esc(r.what)}${r.project ? ', ' + UI.esc(r.project) : ''}</div>
       </div>
       <div class="queue-amount">${r.amount ? UI.fmt.money(r.amount, App.settings.currencySymbol || 'Rs') : ''}</div>
       <div class="queue-age ${old ? 't-over' : 'muted'}">${UI.esc(age)}</div>
-      <button class="btn btn-sm" data-go="${UI.esc(r.route)}"${r.route === 'agreement' && r.id ? ` data-id="${UI.esc(r.id)}"` : ''}>${UI.esc(r.action)}</button>
+      <button class="btn btn-sm" data-go="${UI.esc(r.open && r.id ? r.open : r.route)}"${r.open && r.id ? ` data-id="${UI.esc(r.id)}"` : ''}>${UI.esc(r.action)}</button>
     </li>`;
   }).join('')}</ul>`;
+}
+
+/** Each item's button opens the item itself (owner, 24 Nov 2026), not the list it sits in. */
+function wireQueue(host) {
+  host.querySelectorAll('button[data-go]').forEach(b => {
+    b.onclick = () => b.dataset.id ? navigate(b.dataset.go, b.dataset.id) : navigate(b.dataset.go);
+  });
+}
+
+/**
+ * "Waiting on your approval" at the top of a register (owner, 24 Nov 2026):
+ * every item of the given kinds this user may decide, by the same rules as the
+ * menu badge, oldest first. Shows nothing when nothing waits. opts.projectId
+ * narrows it to one project; opts.title names the box.
+ */
+async function approvalBox(host, kinds, opts) {
+  if (!host) return;
+  opts = opts || {};
+  let rows;
+  try { rows = ((await api('getDecisionQueue', 1000, kinds)).data || {}).rows || []; }
+  catch (e) { host.innerHTML = ''; return; }      // the box is a convenience; the register still works
+  if (opts.projectId) rows = rows.filter(r => r.projectId === opts.projectId);
+  if (!host.isConnected) return;
+  if (!rows.length) { host.innerHTML = ''; return; }
+  const FIRST = 6;
+  const overdue = rows.filter(r => r.ageDays >= 7).length;
+  const draw = all => {
+    host.innerHTML = `<div class="section-head" style="margin-top:0">
+        <h2 class="section-title">${UI.esc(opts.title || 'Waiting on your approval')} (${rows.length})</h2>
+        <span class="muted" style="font-size:13px">oldest first${overdue ? ` · <span class="t-over">${overdue} waiting a week or more</span>` : ''}</span>
+      </div>` + queueHtml(all ? rows : rows.slice(0, FIRST)) +
+      (rows.length > FIRST ? `<div style="margin-top:8px"><button class="btn btn-sm" data-more>${all ? 'Show fewer' : 'Show all ' + rows.length}</button></div>` : '');
+    wireQueue(host);
+    const more = host.querySelector('[data-more]');
+    if (more) more.onclick = () => draw(!all);
+  };
+  draw(false);
 }
 
 async function pageDashboard(root) {
@@ -2805,9 +2842,21 @@ async function pageDashboard(root) {
       'Approvals raised for your role will appear here, oldest first.');
   } else {
     qHost.innerHTML = queueHtml(q.rows);
-    qHost.querySelectorAll('button[data-go]').forEach(b => {
-      b.onclick = () => b.dataset.id ? navigate(b.dataset.go, b.dataset.id) : navigate(b.dataset.go);
-    });
+    wireQueue(qHost);
+    // The dashboard shows the oldest twelve; the rest are one click away.
+    if (q.total > q.rows.length) {
+      const more = UI.el('button', { class: 'btn btn-sm', text: `Show all ${q.total}` });
+      more.style.marginTop = '8px';
+      more.onclick = async () => {
+        more.disabled = true;
+        try {
+          const all = (await api('getDecisionQueue', 1000)).data;
+          qHost.innerHTML = queueHtml(all.rows);
+          wireQueue(qHost);
+        } catch (e) { more.disabled = false; UI.error('Could not load the rest', e.message); }
+      };
+      qHost.appendChild(more);
+    }
   }
 
   /* ---- the money behind it -------------------------------------------- */
@@ -8428,7 +8477,8 @@ async function pagePurchaseOrders(root, arg) {
     pageHead('Purchase Orders', 'What the company has committed to buy',
       `<span id="poActions" class="flex gap-8"></span>` +
       (can('po.create') ? `<button class="btn btn-primary" id="newPoBtn">+ New order</button>` : '')) +
-    `<div id="poSummary" class="stat-grid" style="margin-bottom:16px"></div>
+    `<div id="poWaiting" style="margin-bottom:20px"></div>
+     <div id="poSummary" class="stat-grid" style="margin-bottom:16px"></div>
      <div class="card">
        <div class="card-head">
          <div class="filters">
@@ -8447,6 +8497,8 @@ async function pagePurchaseOrders(root, arg) {
        <div id="poTable">${UI.loadingState()}</div>
        <div id="poPager"></div>
      </div>`;
+  // Orders waiting on this user's approval (owner, 24 Nov 2026); inside a project, that project's only.
+  approvalBox(document.getElementById('poWaiting'), ['purchase-orders'], { projectId: poState.projectId });
 
   const sel = document.getElementById('poStatus');
   sel.innerHTML = `<option value="">All statuses</option>` +
@@ -12217,7 +12269,8 @@ async function pageSubcontractors(root) {
       (can('subcontract.create') ? `<button class="btn btn-primary" id="newSubBtn">+ Register subcontractor</button>` : '') +
       `<button class="btn" id="unassignedBtn">Unassigned payments</button>` +
       `<button class="btn" id="payablesBtn">Payables</button>`) +
-    `<div id="subSummary" class="stat-grid" style="margin-bottom:16px"></div>
+    `<div id="subWaiting" style="margin-bottom:20px"></div>
+     <div id="subSummary" class="stat-grid" style="margin-bottom:16px"></div>
      <div class="card">
        <div class="card-head">
          <div class="filters">
@@ -12236,6 +12289,9 @@ async function pageSubcontractors(root) {
        <div id="subTable">${UI.loadingState()}</div>
        <div id="subPager"></div>
      </div>`;
+
+  // Agreements, bills and rate revisions waiting on this user (owner, 24 Nov 2026).
+  approvalBox(document.getElementById('subWaiting'), ['agreements', 'subcontractors', 'rate-revisions']);
 
   let debounce;
   const catsBtn = document.getElementById('subCatsBtn');
