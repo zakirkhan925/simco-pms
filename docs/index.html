@@ -8968,9 +8968,10 @@ function buildPoForm(existing, projects, vendors) {
             value="${v.Rate === undefined ? '' : v.Rate}" style="text-align:right">
             ${rateLocked.has(v.POItemID) ? '<div class="muted" style="font-size:11.5px;text-align:right">invoiced</div>' : ''}</td>
        <td><input class="input" type="number" step="any" min="0" max="100" data-f="DiscountPercent"
-            value="${v.DiscountPercent ? v.DiscountPercent : ''}" style="text-align:right"></td>
+            value="${v.DiscountPercent ? v.DiscountPercent : ''}" style="text-align:right;min-width:72px"></td>
        <td><input class="input" type="number" step="any" min="0" data-f="DiscountAmount"
-            value="${v.DiscountAmount ? v.DiscountAmount : ''}" style="text-align:right"></td>
+            value="${v.DiscountAmount ? v.DiscountAmount : ''}" style="text-align:right;min-width:100px"
+            title="Fills itself from Disc % — or type rupees here with Disc % empty"></td>
        <td class="num" data-amount>0</td>
        <td>${fromRfq || received ? '' : '<button class="btn btn-sm btn-ghost" data-remove>&times;</button>'}</td>`;
     tr.querySelectorAll('input').forEach(i => i.addEventListener('input', recalc));
