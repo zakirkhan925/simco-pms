@@ -13625,7 +13625,12 @@ async function agreementForm(existing, subId, onSaved, fixedProjectId) {
         ? 'Set by the measured lines — change it under Scope & rates'
         : 'Set by the lines below when the subcontract is measured',
       readonly: !!(existing && existing.IsMeasured) },
-    { name: 'RetentionPercent', label: 'Retention %', type: 'number' },
+    // Once approved, only an administrator may change it (owner, 26 Nov 2026).
+    { name: 'RetentionPercent', label: 'Retention %', type: 'number',
+      readonly: !!existing && ['Draft', 'Returned'].indexOf(existing.Status) === -1 && !can('*'),
+      hint: !!existing && ['Draft', 'Returned'].indexOf(existing.Status) === -1
+        ? (can('*') ? 'Approved agreement — changing it affects every bill made from now on' : 'Only an administrator can change it once approved')
+        : '' },
     { name: 'AdvanceAmount', label: 'Advance paid', type: 'number',
       hint: 'Recovered from bills as work is done' },
     { name: 'StartDate', label: 'Start date', type: 'date', required: true },
