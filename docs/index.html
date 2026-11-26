@@ -12271,7 +12271,8 @@ async function pageSubcontractors(root) {
       `<span id="subActions" class="flex gap-8"></span>` +
       (can('subcontract.create') ? `<button class="btn btn-primary" id="newSubBtn">+ Register subcontractor</button>` : '') +
       `<button class="btn" id="unassignedBtn">Unassigned payments</button>` +
-      `<button class="btn" id="payablesBtn">Payables</button>`) +
+      `<button class="btn" id="payablesBtn">Payables</button>` +
+      (can('subcontract.rates.view') ? `<button class="btn" id="ratesBtn">Rate list</button>` : '')) +
     `<div id="subWaiting" style="margin-bottom:20px"></div>
      <div id="subSummary" class="stat-grid" style="margin-bottom:16px"></div>
      <div class="card">
@@ -12293,6 +12294,8 @@ async function pageSubcontractors(root) {
        <div id="subPager"></div>
      </div>`;
 
+  const ratesBtn = document.getElementById('ratesBtn');
+  if (ratesBtn) ratesBtn.onclick = () => navigate('trade-rates');
   // Agreements, bills and rate revisions waiting on this user (owner, 24 Nov 2026).
   approvalBox(document.getElementById('subWaiting'), ['agreements', 'subcontractors', 'rate-revisions']);
 
@@ -14884,6 +14887,131 @@ async function pageUnassignedPayments(root) {
 }
 PAGES['unassigned-payments'] = pageUnassignedPayments;
 ROUTE_PARENTS['unassigned-payments'] = 'subcontractors';
+
+/* ============================================ RATE LIST OF TRADE WORKS */
+
+/**
+ * The rate list of trade works (owner, 26 Nov 2026): every line of approved
+ * agreements — section heading and line description, unit, rate — by trade,
+ * with the subcontractor, project and agreement it came from. Administrators,
+ * Management and SQS. Filtered here in the page; exported as CSV.
+ */
+const rateState = { search: '', trade: '', project: '', sub: '', unit: '', basis: '', unapproved: false };
+async function pageTradeRates(root) {
+  root.innerHTML =
+    pageHead('Rate list of trade works', 'Every line of the approved agreements: the work, its unit and rate, by trade',
+      `<button class="btn" id="trExport">Export CSV</button> <button class="btn" id="trBack">Back to register</button>`) +
+    `<div id="trSummary" class="stat-grid" style="margin-bottom:16px"></div>
+     <div class="card">
+       <div class="card-head">
+         <div class="filters">
+           <div class="field"><label for="trSearch">Search</label>
+             <input class="input" id="trSearch" placeholder="Work, section, subcontractor" value="${UI.esc(rateState.search)}"></div>
+           <div class="field"><label for="trTrade">Trade</label><select class="input" id="trTrade"></select></div>
+           <div class="field"><label for="trProject">Project</label><select class="input" id="trProject"></select></div>
+           <div class="field"><label for="trSub">Subcontractor</label><select class="input" id="trSub"></select></div>
+           <div class="field"><label for="trUnit">Unit</label><select class="input" id="trUnit"></select></div>
+           <div class="field"><label for="trBasis">Rate basis</label><select class="input" id="trBasis"></select></div>
+           <div class="field"><label>&nbsp;</label>
+             <label class="checkbox"><input type="checkbox" id="trUnapproved"${rateState.unapproved ? ' checked' : ''}> Include agreements not yet approved</label></div>
+           <button class="btn" id="trReset">Reset</button>
+         </div>
+       </div>
+       <div id="trTable">${UI.loadingState()}</div>
+     </div>`;
+  document.getElementById('trBack').onclick = () => navigate('subcontractors');
+
+  let d = null;
+  const load = async () => {
+    document.getElementById('trTable').innerHTML = UI.loadingState();
+    d = (await api('listTradeRates', { includeUnapproved: rateState.unapproved })).data;
+    const fill = (id, all, list, key) => {
+      const sel = document.getElementById(id);
+      sel.innerHTML = `<option value="">${all}</option>` + list.map(x => typeof x === 'string'
+        ? `<option>${UI.esc(x)}</option>` : `<option value="${UI.esc(x.id)}">${UI.esc(x.name)}</option>`).join('');
+      sel.value = rateState[key];
+      if (sel.value !== rateState[key]) rateState[key] = '';
+    };
+    fill('trTrade', 'All trades', d.trades, 'trade');
+    fill('trProject', 'All projects', d.projects, 'project');
+    fill('trSub', 'All subcontractors', d.subcontractors, 'sub');
+    fill('trUnit', 'All units', d.units, 'unit');
+    fill('trBasis', 'Any basis', d.rateBases, 'basis');
+    draw();
+  };
+  const shown = () => {
+    if (!d) return [];
+    const words = rateState.search.toLowerCase().split(/\s+/).filter(Boolean);
+    return d.rows.filter(r =>
+      (!rateState.trade || r.Trade === rateState.trade) && (!rateState.project || r.ProjectID === rateState.project) &&
+      (!rateState.sub || r.SubcontractorID === rateState.sub) && (!rateState.unit || r.Unit === rateState.unit) &&
+      (!rateState.basis || r.RateBasis === rateState.basis) &&
+      (!words.length || words.every(w => [r.Section, r.Description, r.ItemCode, r.SubcontractorName, r.ProjectName,
+        r.AgreementNumber, r.Trade].join(' ').toLowerCase().indexOf(w) !== -1)));
+  };
+  const draw = () => {
+    const rows = shown();
+    const units = [...new Set(rows.map(r => r.Unit))];
+    const rates = rows.map(r => r.Rate);
+    // Lowest and highest mean something only when every line shown is in one unit.
+    const oneUnit = rows.length && units.length === 1;
+    document.getElementById('trSummary').innerHTML = [
+      statTile('Lines', UI.fmt.number(rows.length), `of ${UI.fmt.number(d.total)}${rateState.unapproved ? ', approved or not' : ' on approved agreements'}`),
+      statTile('Trades', String(new Set(rows.map(r => r.Trade || '—')).size), String(new Set(rows.map(r => r.AgreementID)).size) + ' agreement(s)'),
+      oneUnit ? statTile('Lowest rate', cash(Math.min(...rates)), 'per ' + (units[0] || 'unit')) : '',
+      oneUnit ? statTile('Highest rate', cash(Math.max(...rates)), 'per ' + (units[0] || 'unit'))
+        : statTile('Lowest / highest', '—', rows.length ? 'filter to one unit to compare' : '')
+    ].join('');
+    UI.table(document.getElementById('trTable'), {
+      rows, section: r => r.Trade || 'No trade set',
+      empty: UI.emptyState('No lines match', 'Change the filters, or include agreements not yet approved.'),
+      columns: [
+        { key: 'Description', label: 'Work', render: r =>
+            (r.Section ? `<strong>${UI.esc(r.Section)}</strong><br>` : '') + UI.esc(r.Description || '—') +
+            (r.ItemCode ? ` <span class="muted mono">${UI.esc(r.ItemCode)}</span>` : '') },
+        { key: 'Unit', label: 'Unit', width: '70px' },
+        { key: 'Rate', label: 'Rate', align: 'right', width: '110px', render: r => `<strong>${UI.fmt.number(r.Rate, 2)}</strong>` },
+        { key: 'RateBasis', label: 'Basis', width: '110px', render: r => r.RateBasis
+            ? UI.badge(r.RateBasis, r.RateBasis === 'With material' ? 'blue' : 'grey') : '<span class="muted">—</span>' },
+        { key: 'SubcontractorName', label: 'Subcontractor', render: r => r.SubcontractorID
+            ? `<a href="#" class="link" data-sub="${UI.esc(r.SubcontractorID)}">${UI.esc(r.SubcontractorName)}</a>` : UI.esc(r.SubcontractorName) },
+        { key: 'ProjectName', label: 'Project' },
+        { key: 'AgreementNumber', label: 'Agreement', width: '150px', render: r =>
+            `<a href="#" class="link" data-agr="${UI.esc(r.AgreementID)}">${UI.esc(r.AgreementNumber)}</a>` +
+            `<br><span class="muted">${UI.esc(UI.fmt.date(r.Date))}</span>` +
+            (['Active', 'Suspended', 'Completed'].indexOf(r.Status) === -1 ? '<br>' + UI.badge(r.Status, AGREEMENT_TONE[r.Status]) : '') }
+      ]
+    });
+    const t = document.getElementById('trTable');
+    t.querySelectorAll('[data-agr]').forEach(a => { a.onclick = e => { e.preventDefault(); navigate('agreement', a.dataset.agr); }; });
+    t.querySelectorAll('[data-sub]').forEach(a => { a.onclick = e => { e.preventDefault(); navigate('subcontractor', a.dataset.sub); }; });
+  };
+
+  let debounce;
+  document.getElementById('trSearch').oninput = e => {
+    clearTimeout(debounce);
+    debounce = setTimeout(() => { rateState.search = e.target.value; draw(); }, 200);
+  };
+  [['trTrade', 'trade'], ['trProject', 'project'], ['trSub', 'sub'], ['trUnit', 'unit'], ['trBasis', 'basis']].forEach(([id, key]) => {
+    document.getElementById(id).onchange = e => { rateState[key] = e.target.value; draw(); };
+  });
+  document.getElementById('trUnapproved').onchange = e => { rateState.unapproved = e.target.checked; load(); };
+  document.getElementById('trReset').onclick = () => {
+    Object.assign(rateState, { search: '', trade: '', project: '', sub: '', unit: '', basis: '', unapproved: false });
+    pageTradeRates(root);
+  };
+  document.getElementById('trExport').onclick = () => {
+    const q = v => '"' + String(v === null || v === undefined ? '' : v).replace(/"/g, '""') + '"';
+    const head = ['Trade', 'Section', 'Description', 'Item code', 'Unit', 'Rate', 'Rate basis', 'Subcontractor', 'Project',
+                  'Agreement', 'Date', 'Status'];
+    const lines = shown().map(r => [r.Trade, r.Section, r.Description, r.ItemCode, r.Unit, r.Rate, r.RateBasis,
+      r.SubcontractorName, r.ProjectName, r.AgreementNumber, r.Date, r.Status].map(q).join(','));
+    downloadCsv('Rate list of trade works.csv', [head.map(q).join(',')].concat(lines).join('\r\n'));
+  };
+  await load();
+}
+PAGES['trade-rates'] = pageTradeRates;
+ROUTE_PARENTS['trade-rates'] = 'subcontractors';
 
 /* ------------------------------------------------------- REGISTRATION */
 
@@ -20020,7 +20148,7 @@ PAGES['notifications'] = pageNotifications;
     agreements: 'subcontractors',
     agreement: 'subcontractors',
     subbill: 'subcontractors',
-    payables: 'subcontractors', 'unassigned-payments': 'subcontractors',
+    payables: 'subcontractors', 'unassigned-payments': 'subcontractors', 'trade-rates': 'subcontractors',
     'stock-adjustments': 'stock',
     'cash-account': 'cash',
     'cash-reports': 'cash',
