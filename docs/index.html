@@ -15060,7 +15060,7 @@ ROUTE_PARENTS['payables'] = 'subcontractors';
 const CASH_TYPE_LABEL = {
   OPENING: 'Opening balance', ISSUE: 'Cash issued', EXPENSE: 'Expense',
   SUBPAYMENT: 'Subcontractor payment', SUBADVANCE: 'Advance to subcontractor',
-  STAFF_ADVANCE: 'Advance to labour / employee', VENDOR_ADVANCE: 'Advance to vendor',
+  STAFF_ADVANCE: 'Advance to labour / employee', VENDOR_ADVANCE: 'Advance to vendor', VENDOR_PAYMENT: 'Vendor invoice paid',
   PAYROLL: 'Labour / salary paid', PAYMENT_REVERSAL: 'Payment reversed',
   ADVANCE_RECOVERY: 'Advance recovered', RETURN: 'Returned to office',
   TRANSFER_IN: 'Transfer in', TRANSFER_OUT: 'Transfer out', ADJUSTMENT: 'Adjustment'
@@ -15420,6 +15420,7 @@ async function cashSpendDialog(accountId, d) {
         { value: 'EXPENSE', label: 'Site expense' },
         { value: 'SUBPAYMENT', label: 'Payment against a subcontractor bill' },
         { value: 'SUBADVANCE', label: 'Advance to a subcontractor (no bill yet)' },
+        { value: 'VENDOR_PAYMENT', label: 'Payment against a vendor invoice' },
         { value: 'VENDOR_ADVANCE', label: 'Advance to a vendor (no invoice yet)' },
         { value: 'STAFF_ADVANCE', label: 'Advance to labour or an employee' },
         { value: 'ADVANCE_RECOVERY', label: 'Advance settled or returned' },
@@ -15449,6 +15450,9 @@ async function cashSpendDialog(accountId, d) {
         : 'No vendor to choose: none on file, or your role cannot view vendors' },
     { name: 'POID', label: 'Against purchase order', type: 'select', options: [],
       hint: 'Optional' },
+    // A vendor's invoice paid in cash from the float (owner's request, 26 Nov 2026).
+    { name: 'SupplierInvoiceID', label: 'Invoice being paid', type: 'select', span: 2, options: [],
+      hint: 'Choose the vendor first' },
     // Paid to a subcontractor's supplier, recovered from his bills (owner, 20 Nov 2026).
     { name: 'OnBehalfSubcontractorID', label: 'On behalf of a subcontractor', type: 'select', span: 2,
       options: behalfOptions, hint: ON_BEHALF_HINT },
@@ -15476,6 +15480,7 @@ async function cashSpendDialog(accountId, d) {
     EXPENSE:          ['Category', 'CostCode', 'PayeeName', 'Description'],
     SUBPAYMENT:       ['SubBillID', 'Description'],
     SUBADVANCE:       ['SubcontractorID', 'AgreementID', 'Description'],
+    VENDOR_PAYMENT:   ['VendorID', 'SupplierInvoiceID', 'Description'],
     VENDOR_ADVANCE:   ['VendorID', 'POID', 'OnBehalfSubcontractorID', 'Description'],
     STAFF_ADVANCE:    ['PersonType', 'PersonID', 'PersonName', 'Description'],
     ADVANCE_RECOVERY: ['StaffAdvanceID', 'Description'],
@@ -15485,7 +15490,8 @@ async function cashSpendDialog(accountId, d) {
   const applyType = () => {
     const show = SHOW[typeField.value] || [];
     ['Category', 'CostCode', 'SubBillID', 'SubcontractorID', 'AgreementID', 'StaffAdvanceID',
-     'VendorID', 'POID', 'PersonType', 'PersonID', 'PersonName', 'PayeeName', 'Description']
+     'VendorID', 'POID', 'SupplierInvoiceID', 'OnBehalfSubcontractorID', 'PersonType', 'PersonID', 'PersonName',
+     'PayeeName', 'Description']
       .forEach(n => {
         const el = form.querySelector('[name="' + n + '"]');
         if (!el) return;
@@ -15493,6 +15499,11 @@ async function cashSpendDialog(accountId, d) {
         if (row) row.style.display = show.indexOf(n) === -1 ? 'none' : '';
       });
     if (typeField.value === 'STAFF_ADVANCE') applyPersonId();
+    if (typeField.value === 'VENDOR_PAYMENT') applyInvoices();
+    // The vendor hint speaks of an advance; for an invoice it is the invoice that is settled.
+    const vHint = vRow() && vRow().querySelector('.hint');
+    if (vHint) vHint.textContent = typeField.value === 'VENDOR_PAYMENT'
+      ? 'Only vendors with an invoice still owing on this project are worth choosing' : vendorHint;
   };
 
   // The register's names for the chosen kind; a name typed only when he is not on it.
@@ -15537,7 +15548,33 @@ async function cashSpendDialog(accountId, d) {
     poField.innerHTML += poCache[pid].filter(o => String(o.VendorID) === String(vField.value) && o.Status !== 'Cancelled')
       .map(o => `<option value="${UI.esc(o.POID)}">${UI.esc(o.POID + ' — ' + o.Status)}</option>`).join('');
   };
-  vField.onchange = applyVendor;
+  // His invoices on this project with something still owing, and how much.
+  const invField = form.querySelector('[name="SupplierInvoiceID"]');
+  const vRow = () => vField.closest('.field');
+  const vendorHint = (vRow() && vRow().querySelector('.hint') || {}).textContent || '';
+  const invCache = {};
+  const applyInvoices = async () => {
+    const setHint = t => {
+      const row = invField.closest('.field');
+      let h = row && row.querySelector('.hint');
+      if (!h && row) { h = UI.el('div', { class: 'hint' }); row.appendChild(h); }
+      if (h) h.textContent = t;
+    };
+    invField.innerHTML = '';
+    if (!vField.value) { setHint('Choose the vendor first'); return; }
+    const pid = proj();
+    if (!invCache[pid]) {
+      try { invCache[pid] = (await api('listCashPayableInvoices', accountId, pid)).data.invoices; }
+      catch (e) { invCache[pid] = []; }
+    }
+    const mine = invCache[pid].filter(i => String(i.VendorID) === String(vField.value));
+    invField.innerHTML = mine.map(i => `<option value="${UI.esc(i.SupplierInvoiceID)}" data-owing="${i.Outstanding}">` +
+      UI.esc(i.SupplierInvoiceID + (i.InvoiceNumber ? ' (his no. ' + i.InvoiceNumber + ')' : '') +
+        (i.POID ? ' — ' + i.POID : '') + ' — ' + cash(i.Outstanding) + ' owing of ' + cash(i.NetAmount)) + '</option>').join('');
+    setHint(mine.length ? 'The amount cannot be more than the invoice still owes'
+      : 'This vendor has no unpaid invoice on this project. Pay it as an advance instead, or ask the office to post the invoice.');
+  };
+  vField.onchange = () => { applyVendor(); if (typeField.value === 'VENDOR_PAYMENT') applyInvoices(); };
   typeField.onchange = applyType;
   applyType();
 
@@ -15570,6 +15607,7 @@ async function cashSpendDialog(accountId, d) {
     if (hint) hint.textContent = list.length ? '' : 'No approved bills are outstanding on this project';
     applySub();
     applyVendor();
+    if (typeField.value === 'VENDOR_PAYMENT') applyInvoices();
     loadPeople();
   };
 
@@ -15588,8 +15626,15 @@ async function cashSpendDialog(accountId, d) {
           if (data.Type === 'STAFF_ADVANCE' && !data.PersonID && !String(data.PersonName || '').trim()) {
             UI.setFieldError(form, 'PersonName', 'Choose him from the register, or type his name'); return;
           }
-          if (data.Type === 'VENDOR_ADVANCE' && !data.VendorID) {
+          if ((data.Type === 'VENDOR_ADVANCE' || data.Type === 'VENDOR_PAYMENT') && !data.VendorID) {
             UI.setFieldError(form, 'VendorID', 'Choose the vendor'); return;
+          }
+          if (data.Type === 'VENDOR_PAYMENT') {
+            const opt = invField.selectedOptions[0];
+            if (!opt || !invField.value) { UI.setFieldError(form, 'SupplierInvoiceID', 'Choose the invoice being paid'); return; }
+            if (Number(data.Amount) > Number(opt.dataset.owing)) {
+              UI.setFieldError(form, 'Amount', 'More than the invoice still owes (' + cash(opt.dataset.owing) + ')'); return;
+            }
           }
           m.busy(true);
           try {
