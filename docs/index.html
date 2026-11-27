@@ -1165,13 +1165,25 @@ const UI = (() => {
     mount.appendChild(wrap);
   }
 
-  function pager(mount, { page, totalPages, total, pageSize, onPage }) {
+  // onPageSize (optional, owner 27 Nov 2026): offers "Show 25 / 50 / 100 / 500 / 1000" rows a page.
+  function pager(mount, { page, totalPages, total, pageSize, onPage, onPageSize, sizes }) {
     mount.innerHTML = '';
     if (!total) return;
     const bar = el('div', { class: 'pager' });
     const from = (page - 1) * pageSize + 1;
     const to = Math.min(total, page * pageSize);
-    bar.appendChild(el('div', { text: `Showing ${from}–${to} of ${total}` }));
+    const info = el('div', { text: `Showing ${from}–${to} of ${total}` });
+    if (onPageSize) {
+      const sel = el('select', { 'aria-label': 'Rows per page', style: 'margin-left:12px;width:auto;display:inline-block;padding:2px 6px' });
+      (sizes || [25, 50, 100, 500, 1000]).forEach(n => {
+        const o = el('option', { value: String(n), text: n + ' a page' });
+        if (n === Number(pageSize)) o.selected = true;
+        sel.appendChild(o);
+      });
+      sel.onchange = () => onPageSize(Number(sel.value));
+      info.appendChild(sel);
+    }
+    bar.appendChild(info);
     const btns = el('div', { class: 'pager-buttons' });
     const prev = el('button', { class: 'btn btn-sm', text: 'Previous' });
     prev.disabled = page <= 1;
@@ -11929,7 +11941,9 @@ ROUTE_PARENTS['billing'] = 'projects';
 
 const expState = { page: 1, pageSize: 25, search: '', status: '', category: '', projectId: '',
                    mineOnly: false, awaitingMe: false, sortBy: 'ExpenseDate', sortDir: 'desc' };
-const subState = { page: 1, pageSize: 25, search: '', trade: '', category: '', group: '', status: '' };
+// Rows a page is remembered in this browser (owner, 27 Nov 2026).
+const subState = { page: 1, pageSize: (() => { try { return Number(localStorage.getItem('pms_sub_pagesize')) || 25; } catch (e) { return 25; } })(),
+  search: '', trade: '', category: '', group: '', status: '' };
 const agrState = { page: 1, pageSize: 25, search: '', status: '', projectId: '', liveOnly: false };
 
 const SUB_TONE = { Active: 'green', Inactive: 'grey', Blacklisted: 'red', Unknown: 'amber' };
@@ -12409,7 +12423,7 @@ async function loadSubcontractors() {
           (r.ContactPerson ? `<div class="muted small">${UI.esc(r.ContactPerson)}</div>` : '') },
       // CNIC beside the name (owner, 27 Nov 2026); a dash where none is recorded.
       { key: 'CNIC', label: 'CNIC', width: '150px',
-        render: r => r.CNIC ? `<span class="mono">${UI.esc(r.CNIC)}</span>` : '<span class="muted">—</span>' },
+        render: r => r.CNIC ? `<span class="mono" style="white-space:nowrap">${UI.esc(r.CNIC)}</span>` : '<span class="muted">—</span>' },
       { key: 'Phone', label: 'Phone', width: '130px' },
       { key: 'AgreementCount', label: 'Agreements', align: 'right', width: '100px' },
       { key: 'Status', label: 'Status', width: '110px',
@@ -12425,7 +12439,12 @@ async function loadSubcontractors() {
   });
   UI.pager(document.getElementById('subPager'), {
     page: d.page, totalPages: d.totalPages, total: d.total, pageSize: d.pageSize,
-    onPage: p => { subState.page = p; loadSubcontractors(); }
+    onPage: p => { subState.page = p; loadSubcontractors(); },
+    onPageSize: n => {
+      subState.pageSize = n; subState.page = 1;
+      try { localStorage.setItem('pms_sub_pagesize', String(n)); } catch (e) { /* private window: not remembered */ }
+      loadSubcontractors();
+    }
   });
 }
 
