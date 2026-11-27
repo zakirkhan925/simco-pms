@@ -12407,7 +12407,9 @@ async function loadSubcontractors() {
         render: r => `<div><strong>${UI.esc(r.CompanyName)}</strong></div>` +
           categoryChips(r) +
           (r.ContactPerson ? `<div class="muted small">${UI.esc(r.ContactPerson)}</div>` : '') },
-
+      // CNIC beside the name (owner, 27 Nov 2026); a dash where none is recorded.
+      { key: 'CNIC', label: 'CNIC', width: '150px',
+        render: r => r.CNIC ? `<span class="mono">${UI.esc(r.CNIC)}</span>` : '<span class="muted">—</span>' },
       { key: 'Phone', label: 'Phone', width: '130px' },
       { key: 'AgreementCount', label: 'Agreements', align: 'right', width: '100px' },
       { key: 'Status', label: 'Status', width: '110px',
@@ -14455,7 +14457,7 @@ async function pageSubBill(root, billId) {
   if (d.canReverseApproval) {
     actions.push(`<button class="btn btn-danger" id="sbUnapprove">Reverse approval</button>`);
   }
-  // An administrator corrects the advance recovery on an approved bill (24 Nov 2026); the server sends this only to one.
+  // An administrator or SQS corrects the advance recovery on an approved bill (24 / 26 Nov 2026); the server sends this only to them.
   if (d.advanceCorrection) actions.push(`<button class="btn" id="sbAdvFix">Correct advance recovery</button>`);
   if (d.canPay) actions.push(`<button class="btn btn-primary" id="sbPay">Record payment</button>`);
 
