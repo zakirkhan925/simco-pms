@@ -9304,7 +9304,8 @@ async function pageStock(root, arg) {
     pageHead('Stock', 'What is on the shelf, and how it got there',
       (can('stock.item.create') ? `<button class="btn" id="newItemBtn">+ New item</button>
         <button class="btn" id="newRoomBtn">+ New store</button>` : '') +
-      (can('stock.adjust') ? `<button class="btn" id="openingBtn">Opening stock</button>` : '') +
+      (can('stock.adjust') ? `<button class="btn" id="openingBtn">Opening stock</button>
+        <button class="btn" id="sheetBtn">Count / write-off sheet</button>` : '') +
       (can('stock.transfer') ? `<button class="btn" id="transferBtn">Transfer</button>` : '') +
       // Count corrections and write-offs waiting for approval (owner, 21 Nov 2026).
       `<button class="btn" id="adjListBtn">Adjustments &amp; write-offs</button>`) +
@@ -9409,6 +9410,7 @@ async function pageStock(root, arg) {
   bind('newRoomBtn', () => openStockRoomForm());
   bind('openingBtn', () => openOpeningStockForm(rooms));
   bind('transferBtn', () => openTransferForm(rooms));
+  bind('sheetBtn', () => openAdjustmentSheet(rooms, stockState.stockRoomId));
   bind('adjListBtn', () => navigate('stock-adjustments'));
 
   await loadStock();
@@ -9723,9 +9725,65 @@ async function openOpeningStockForm(rooms) {
   });
 }
 
+/*
+ * Item lines for the transfer and the count / write-off sheet (owner, 27 Nov 2026:
+ * many items at once, as IMS). Each line: an item held in the chosen store, its
+ * book quantity, and the quantity. Lines are added with "+ Add item", or all at
+ * once with "Add every item in this store".
+ */
+function stockLineEditor(host, opts) {
+  // opts: { itemsFor(roomId) -> rows, label (qty heading), withReason, reasons, onChange }
+  let roomId = '';
+  const lines = [];
+  host.innerHTML = `<div class="table-wrap"><table class="table"><thead><tr>
+      <th>Item</th><th class="num" style="width:120px">In store</th>
+      <th class="num" style="width:140px">${UI.esc(opts.label)}</th>
+      ${opts.withReason ? '<th style="width:170px">Reason (if not the sheet\'s)</th>' : ''}
+      <th style="width:40px"></th></tr></thead><tbody></tbody></table></div>
+    <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap">
+      <button type="button" class="btn btn-sm" data-add>+ Add item</button>
+      <button type="button" class="btn btn-sm" data-all>Add every item in this store</button>
+      <span class="muted" data-count style="align-self:center"></span></div>`;
+  const tbody = host.querySelector('tbody');
+  const held = () => opts.itemsFor(roomId);
+  const draw = () => {
+    const rows = held();
+    tbody.innerHTML = lines.map((l, i) => {
+      const it = rows.find(r => r.ItemID === l.ItemID);
+      const options = `<option value="">Choose an item…</option>` + rows.map(r =>
+        `<option value="${UI.esc(r.ItemID)}"${r.ItemID === l.ItemID ? ' selected' : ''}>${UI.esc(r.ItemCode)} — ${UI.esc(r.ItemName)}</option>`).join('');
+      return `<tr>
+        <td><select class="input" data-item="${i}">${options}</select></td>
+        <td class="num">${it ? UI.fmt.number(it.Closing, 3) + ' ' + UI.esc(it.Unit) : '—'}</td>
+        <td class="num"><input class="input" type="number" step="any" min="0" data-qty="${i}" value="${l.Quantity === '' ? '' : UI.esc(l.Quantity)}" style="text-align:right"></td>
+        ${opts.withReason ? `<td><select class="input" data-reason="${i}"><option value="">(sheet's)</option>${opts.reasons.map(x =>
+          `<option${x === l.ReasonCode ? ' selected' : ''}>${UI.esc(x)}</option>`).join('')}</select></td>` : ''}
+        <td><button type="button" class="btn btn-ghost btn-sm" data-del="${i}" aria-label="Remove line">×</button></td></tr>`;
+    }).join('') || `<tr><td colspan="${opts.withReason ? 5 : 4}" class="muted">No items yet. Add one, or every item in the store.</td></tr>`;
+    host.querySelector('[data-count]').textContent = lines.length ? `${lines.length} line${lines.length === 1 ? '' : 's'}` : '';
+    tbody.querySelectorAll('[data-item]').forEach(s => s.onchange = () => { lines[+s.dataset.item].ItemID = s.value; draw(); });
+    tbody.querySelectorAll('[data-qty]').forEach(s => s.oninput = () => { lines[+s.dataset.qty].Quantity = s.value; if (opts.onChange) opts.onChange(); });
+    tbody.querySelectorAll('[data-reason]').forEach(s => s.onchange = () => { lines[+s.dataset.reason].ReasonCode = s.value; });
+    tbody.querySelectorAll('[data-del]').forEach(b => b.onclick = () => { lines.splice(+b.dataset.del, 1); draw(); });
+    if (opts.onChange) opts.onChange();
+  };
+  host.querySelector('[data-add]').onclick = () => { lines.push({ ItemID: '', Quantity: '', ReasonCode: '' }); draw(); };
+  host.querySelector('[data-all]').onclick = () => {
+    for (let k = lines.length - 1; k >= 0; k--) if (!lines[k].ItemID && lines[k].Quantity === '') lines.splice(k, 1);
+    const have = new Set(lines.map(l => l.ItemID));
+    held().forEach(r => { if (!have.has(r.ItemID)) lines.push({ ItemID: r.ItemID, Quantity: opts.prefill ? opts.prefill(r) : '', ReasonCode: '' }); });
+    draw();
+  };
+  return {
+    setRoom(id) { roomId = id; lines.length = 0; lines.push({ ItemID: '', Quantity: '', ReasonCode: '' }); draw(); },
+    lines: () => lines,
+    item: id => held().find(r => r.ItemID === id),
+  };
+}
+
 async function openTransferForm(rooms) {
   let items = [];
-  try { items = (await api('listStock', { pageSize: 500, inStockOnly: true })).data.rows; }
+  try { items = (await api('listStock', { pageSize: 1000, inStockOnly: true })).data.rows; }
   catch (e) { UI.error('Could not load stock', e.message); return; }
   if (items.length === 0) { UI.warn('Nothing to transfer', 'No store holds any stock.'); return; }
   if (rooms.length < 2) { UI.warn('Only one store', 'A transfer needs somewhere to go.'); return; }
@@ -9734,40 +9792,20 @@ async function openTransferForm(rooms) {
     { name: 'FromStockRoomID', label: 'From store', type: 'select', required: true,
       options: rooms.map(r => ({ value: r.StockRoomID, label: r.Name })) },
     { name: 'ToStockRoomID', label: 'To store', type: 'select', required: true,
-      options: rooms.map(r => ({ value: r.StockRoomID, label: r.Name })) },
-    { name: 'ItemID', label: 'Item', type: 'select', required: true, span: 2, options: [] },
-    { name: 'Quantity', label: 'Quantity', type: 'number', required: true }
+      options: rooms.map(r => ({ value: r.StockRoomID, label: r.Name })) }
   ];
   const body = UI.el('div');
   const form = UI.form(fields);
   body.appendChild(form);
-  const note = UI.el('div', { class: 'mt-16', id: 'transferNote' });
-  body.appendChild(note);
-
+  const linesHost = UI.el('div', { class: 'mt-16' });
+  body.appendChild(linesHost);
   const fromSel = form.querySelector('[name="FromStockRoomID"]');
-  const itemSel = form.querySelector('[name="ItemID"]');
   const toSel = form.querySelector('[name="ToStockRoomID"]');
   if (rooms.length > 1) toSel.value = rooms[1].StockRoomID;
-
-  function refreshItems() {
-    const held = items.filter(i => i.StockRoomID === fromSel.value);
-    itemSel.innerHTML = held.length
-      ? held.map(i => `<option value="${UI.esc(i.ItemID)}" data-available="${i.Closing}">
-          ${UI.esc(i.ItemCode)} — ${UI.esc(i.ItemName)} (${UI.fmt.number(i.Closing, 3)} ${UI.esc(i.Unit)})
-        </option>`).join('')
-      : `<option value="">Nothing in this store</option>`;
-    refreshNote();
-  }
-  function refreshNote() {
-    const opt = itemSel.selectedOptions[0];
-    const available = opt ? Number(opt.dataset.available || 0) : 0;
-    note.innerHTML = opt && opt.value
-      ? `<div class="banner banner-info"><div>Available to move: <strong>${UI.fmt.number(available, 3)}</strong></div></div>`
-      : '';
-  }
-  fromSel.onchange = refreshItems;
-  itemSel.onchange = refreshNote;
-  refreshItems();
+  const ed = stockLineEditor(linesHost, { label: 'Quantity to move',
+    itemsFor: id => items.filter(i => i.StockRoomID === id) });
+  fromSel.onchange = () => ed.setRoom(fromSel.value);
+  ed.setRoom(fromSel.value);
 
   UI.modal({
     title: 'Transfer stock', size: 'wide', body,
@@ -9776,15 +9814,96 @@ async function openTransferForm(rooms) {
       { label: 'Transfer', class: 'btn-primary', onClick: async m => {
         const data = UI.validate(form, fields);
         if (!data) return;
-        if (data.FromStockRoomID === data.ToStockRoomID) {
-          UI.warn('Choose two different stores'); return;
+        if (data.FromStockRoomID === data.ToStockRoomID) { UI.warn('Choose two different stores'); return; }
+        const lines = ed.lines().filter(l => l.ItemID || l.Quantity !== '');
+        if (!lines.length) { UI.warn('Add at least one item'); return; }
+        for (const l of lines) {
+          const it = ed.item(l.ItemID);
+          if (!it) { UI.warn('Choose the item on every line'); return; }
+          const q = Number(l.Quantity);
+          if (!(q > 0)) { UI.warn('Quantity missing', `Enter how much ${it.ItemCode} to move.`); return; }
+          if (q > Number(it.Closing) + 1e-9) { UI.warn('Not enough in the store', `Only ${UI.fmt.number(it.Closing, 3)} ${it.Unit} of ${it.ItemCode}.`); return; }
         }
+        if (new Set(lines.map(l => l.ItemID)).size !== lines.length) { UI.warn('An item is on two lines', 'Put each item on one line.'); return; }
         m.busy(true);
         try {
-          const res = await api('createStockTransfer', data);
+          const res = await api('createStockTransfer', { FromStockRoomID: data.FromStockRoomID, ToStockRoomID: data.ToStockRoomID,
+            Lines: lines.map(l => ({ ItemID: l.ItemID, Quantity: Number(l.Quantity) })) });
           m.close(); UI.success('Transferred', res.message);
           navigate('stock');
         } catch (e) { UI.error('Could not transfer', e.message); }
+        finally { m.busy(false); }
+      }}
+    ]
+  });
+}
+
+/** A count correction or write-off of many items in one store, sent for approval as one sheet. */
+async function openAdjustmentSheet(rooms, roomId) {
+  let items = [];
+  try { items = (await api('listStock', { pageSize: 1000 })).data.rows; }
+  catch (e) { UI.error('Could not load stock', e.message); return; }
+  const reasons = (App.enums && App.enums.STOCK_WRITEOFF_REASONS) ||
+    ['Breakage', 'Expired', 'Weather damage', 'Handling damage', 'Theft / lost', 'Site wastage', 'Other'];
+  const fields = [
+    { name: 'StockRoomID', label: 'Store', type: 'select', required: true,
+      options: rooms.map(r => ({ value: r.StockRoomID, label: r.Name })) },
+    { name: 'Kind', label: 'What is it?', type: 'select', required: true,
+      options: [{ value: 'Adjustment', label: 'Count correction: the shelf disagrees with the books' },
+                { value: 'Wastage', label: 'Wastage: write off' }, { value: 'Damage', label: 'Damage: write off' }] },
+    { name: 'ReasonCode', label: 'Reason (write-off)', type: 'select', options: [''].concat(reasons) },
+    { name: 'Reason', label: 'Details', type: 'textarea', span: 2,
+      hint: 'Applies to every line. Required for a count correction, and when the reason is Other.' }
+  ];
+  const body = UI.el('div');
+  body.innerHTML = `<div class="banner banner-warn"><div>Nothing changes until the sheet is <strong>approved</strong>;
+    then every line is posted together. Lines whose count matches the books are left out.</div></div>`;
+  const form = UI.form(fields);
+  body.appendChild(form);
+  const linesHost = UI.el('div', { class: 'mt-16' });
+  body.appendChild(linesHost);
+  const roomSel = form.querySelector('[name="StockRoomID"]');
+  const kindSel = form.querySelector('[name="Kind"]');
+  const rcRow = form.querySelector('[name="ReasonCode"]').closest('.field');
+  if (roomId) roomSel.value = roomId;
+  let ed;
+  const build = () => {
+    const count = kindSel.value === 'Adjustment';
+    rcRow.style.display = count ? 'none' : '';
+    ed = stockLineEditor(linesHost, { label: count ? 'Counted quantity' : 'Quantity written off', withReason: !count, reasons,
+      itemsFor: id => items.filter(i => i.StockRoomID === id && (count || Number(i.Closing) > 0)) });
+    ed.setRoom(roomSel.value);
+  };
+  roomSel.onchange = () => ed.setRoom(roomSel.value);
+  kindSel.onchange = build;
+  build();
+
+  UI.modal({
+    title: 'Count / write-off sheet', size: 'wide', body,
+    footer: [
+      { label: 'Cancel', onClick: m => m.close() },
+      { label: 'Send for approval', class: 'btn-primary', onClick: async m => {
+        const data = UI.validate(form, fields);
+        if (!data) return;
+        const count = data.Kind === 'Adjustment';
+        const lines = ed.lines().filter(l => l.ItemID || l.Quantity !== '');
+        if (!lines.length) { UI.warn('Add at least one item'); return; }
+        for (const l of lines) {
+          const it = ed.item(l.ItemID);
+          if (!it) { UI.warn('Choose the item on every line'); return; }
+          if (l.Quantity === '' || isNaN(Number(l.Quantity)) || Number(l.Quantity) < 0) {
+            UI.warn('Quantity missing', `Enter the ${count ? 'counted quantity' : 'quantity written off'} for ${it.ItemCode}.`); return;
+          }
+        }
+        if (new Set(lines.map(l => l.ItemID)).size !== lines.length) { UI.warn('An item is on two lines', 'Put each item on one line.'); return; }
+        m.busy(true);
+        try {
+          const res = await api('createStockAdjustment', { StockRoomID: data.StockRoomID, Kind: data.Kind, Reason: data.Reason,
+            ReasonCode: data.ReasonCode, Lines: lines.map(l => count ? { ItemID: l.ItemID, QtyAfter: Number(l.Quantity) }
+              : { ItemID: l.ItemID, Quantity: Number(l.Quantity), ReasonCode: l.ReasonCode || '' }) });
+          m.close(); UI.success('Sent for approval', res.message);
+          navigate('stock-adjustments');
+        } catch (e) { UI.error('Not sent', e.message); }
         finally { m.busy(false); }
       }}
     ]
@@ -9866,6 +9985,7 @@ async function pageStockAdjustments(root) {
   catch (e) { root.innerHTML = pageHead('Adjustments & write-offs', '') + UI.errorState(e.message); return; }
   root.innerHTML = pageHead('Adjustments & write-offs',
       'Count corrections, wastage and damage: raised, then approved before stock moves',
+      (d.canRaise ? `<button class="btn btn-primary" id="adjSheet">+ Count / write-off sheet</button> ` : '') +
       `<button class="btn" id="adjBack">Back to stock</button>`) +
     `<div class="card"><div class="card-head"><div class="filters">
        <div class="field"><label for="adjStatus">Status</label><select class="input" id="adjStatus">
@@ -9878,9 +9998,18 @@ async function pageStockAdjustments(root) {
   st.value = adjState.status;
   st.onchange = () => { adjState.status = st.value; pageStockAdjustments(root); };
   document.getElementById('adjBack').onclick = () => navigate('stock');
+  const sb = document.getElementById('adjSheet');
+  if (sb) sb.onclick = async () => {
+    try { openAdjustmentSheet((await api('listStockRooms', { activeOnly: true })).data.rows, ''); }
+    catch (err) { UI.error('Could not load the stores', err.message); }
+  };
+  // A sheet of many lines is decided as one (owner, 27 Nov 2026): its buttons sit on its first line shown.
+  const shown = new Set();
+  d.rows.forEach(r => { r._first = !shown.has(r.AdjNumber); shown.add(r.AdjNumber); });
   UI.table(document.getElementById('adjTable'), {
     columns: [
-      { key: 'AdjustmentID', label: 'No.', width: '95px', render: r => `<span class="mono">${UI.esc(r.AdjustmentID)}</span><br>
+      { key: 'AdjustmentID', label: 'No.', width: '110px', render: r => `<span class="mono">${UI.esc(r.AdjNumber || r.AdjustmentID)}</span>` +
+          (r.SheetLines > 1 ? `<br><span class="muted" style="font-size:11.5px">line ${UI.esc(String(r.AdjustmentID).split('-').pop())} of ${r.SheetLines}</span>` : '') + `<br>
           <span class="muted" style="font-size:11.5px">${UI.esc(UI.fmt.date(r.AdjDate))}</span>` },
       { key: 'Kind', label: 'Kind', render: r => UI.esc(r.Kind) + (r.ReasonCode ? `<br><span class="muted" style="font-size:12px">${UI.esc(r.ReasonCode)}</span>` : '') },
       { key: 'ItemCode', label: 'Item', render: r => `<strong>${UI.esc(r.ItemCode)}</strong> ${UI.esc(r.ItemName)}` +
@@ -9895,16 +10024,18 @@ async function pageStockAdjustments(root) {
           (r.DecisionRemarks ? `: ${UI.esc(r.DecisionRemarks)}` : '') + (r.CancelReason ? ` · ${UI.esc(r.CancelReason)}` : '') + '</span>' },
       { key: 'Status', label: 'Status', render: r => UI.badge(r.Status, ADJ_TONE[r.Status]) },
       { key: 'x', label: '', align: 'right', render: r => `<div class="row-actions">` +
-          (r.CanDecide ? `<button class="btn btn-sm btn-primary" data-adjok="${UI.esc(r.AdjustmentID)}">Approve</button>
-             <button class="btn btn-sm btn-danger" data-adjno="${UI.esc(r.AdjustmentID)}">Reject</button>` : '') +
-          (r.CanCancel ? ` <button class="btn btn-sm" data-adjcancel="${UI.esc(r.AdjustmentID)}">Withdraw</button>` : '') + `</div>` }
+          (!r._first ? '' : (r.CanDecide ? `<button class="btn btn-sm btn-primary" data-adjok="${UI.esc(r.AdjNumber || r.AdjustmentID)}">${r.SheetLines > 1 ? 'Approve all ' + r.SheetLines : 'Approve'}</button>
+             <button class="btn btn-sm btn-danger" data-adjno="${UI.esc(r.AdjNumber || r.AdjustmentID)}">${r.SheetLines > 1 ? 'Reject all' : 'Reject'}</button>` : '') +
+          (r.CanCancel ? ` <button class="btn btn-sm" data-adjcancel="${UI.esc(r.AdjNumber || r.AdjustmentID)}">Withdraw</button>` : '')) + `</div>` }
     ],
     rows: d.rows,
     empty: UI.emptyState('Nothing here', adjState.status === 'Pending Approval' ? 'Nothing is waiting for approval.' : 'No adjustments match.')
   });
   const reload = () => pageStockAdjustments(root);
   root.querySelectorAll('[data-adjok]').forEach(b => { b.onclick = () => UI.confirm({
-    title: 'Approve ' + b.dataset.adjok, message: 'The stock is adjusted now, at the average rate.', confirmLabel: 'Approve',
+    title: 'Approve ' + b.dataset.adjok, message: 'The stock is adjusted now, at the average rate' +
+      (d.rows.filter(x => x.AdjNumber === b.dataset.adjok && x.Status === 'Pending Approval').length > 1 ? ': every line of the sheet together.' : '.'),
+    confirmLabel: 'Approve',
     onConfirm: async m => {
       try { UI.success('Approved', (await api('decideStockAdjustment', b.dataset.adjok, 'APPROVE', '')).message); m.close(); reload(); }
       catch (e) { UI.error('Not approved', e.message); }
