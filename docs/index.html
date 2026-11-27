@@ -9309,6 +9309,11 @@ async function pageStock(root, arg) {
       // Count corrections and write-offs waiting for approval (owner, 21 Nov 2026).
       `<button class="btn" id="adjListBtn">Adjustments &amp; write-offs</button>`) +
     `<div id="stockSummary" class="stat-grid" style="margin-bottom:16px"></div>
+     <div class="card" id="stockByStoreCard" style="margin-bottom:16px">
+       <div class="card-head"><strong>Stock value by store</strong>
+         <span class="muted" style="font-size:12px">At weighted average rate. Click a store to see its stock.</span></div>
+       <div id="stockByStore"></div>
+     </div>
      <div class="card">
        <div class="card-head">
          <div class="filters">
@@ -9340,6 +9345,41 @@ async function pageStock(root, arg) {
   roomSel.innerHTML = `<option value="">All stores</option>` +
     rooms.map(r => `<option value="${UI.esc(r.StockRoomID)}">${UI.esc(r.Name)}</option>`).join('');
   roomSel.value = stockState.stockRoomId;
+
+  // Every store's stock value side by side, as IMS showed it (owner, 27 Nov 2026). The
+  // server already sends each store's value and item count with the store list.
+  const byStore = document.getElementById('stockByStore');
+  const withValue = rooms.filter(r => 'StockValue' in r);
+  if (!withValue.length) {
+    document.getElementById('stockByStoreCard').hidden = true;
+  } else {
+    const sorted = withValue.slice().sort((x, y) => (y.StockValue || 0) - (x.StockValue || 0));
+    const total = sorted.reduce((t, r) => t + (Number(r.StockValue) || 0), 0);
+    const items = sorted.reduce((t, r) => t + (Number(r.ItemCount) || 0), 0);
+    UI.table(byStore, {
+      rowKey: 'StockRoomID',
+      columns: [
+        { key: 'Name', label: 'Store', render: r => `<a href="#" class="link" data-room="${UI.esc(r.StockRoomID)}">${UI.esc(r.Name)}</a>` },
+        { key: 'ProjectName', label: 'Project' },
+        { key: 'ItemCount', label: 'Items in stock', align: 'right' },
+        { key: 'StockValue', label: 'Stock value', align: 'right', render: r => money(r.StockValue) },
+        { key: 'share', label: 'Share', align: 'right', render: r => total ? (100 * (Number(r.StockValue) || 0) / total).toFixed(1) + '%' : '—' }
+      ],
+      rows: sorted.concat([{ StockRoomID: '', Name: '', ProjectName: '', ItemCount: items, StockValue: total, _total: true }])
+    });
+    const last = byStore.querySelector('tbody tr:last-child');
+    if (last) last.innerHTML = `<td><strong>All stores</strong></td><td></td>
+      <td class="num"><strong>${UI.fmt.number(items, 0)}</strong></td><td class="num"><strong>${money(total)}</strong></td><td class="num">100%</td>`;
+    byStore.querySelectorAll('[data-room]').forEach(a => {
+      a.onclick = e => {
+        e.preventDefault();
+        stockState.stockRoomId = a.dataset.room; stockState.page = 1;
+        roomSel.value = a.dataset.room;
+        loadStock();
+        document.getElementById('stockTable').scrollIntoView({ behavior: 'smooth' });
+      };
+    });
+  }
 
   let debounce;
   document.getElementById('stockSearch').oninput = e => {
@@ -17445,6 +17485,7 @@ function bgmOverdueTable(host, rows) {
 async function pageBgmRegister(root) {
   root.innerHTML = pageHead('Instrument Register', 'Every CDR, bank guarantee, performance bond and insurance guarantee',
     `<button class="btn" id="bgmCsv">Export to Excel</button> <button class="btn" id="bgmPrint">Print</button>
+     <button class="btn hidden" id="bgmImport">Import from Excel</button>
      <button class="btn btn-primary hidden" id="bgmNew">+ Register instrument</button>`) +
     `<div class="card"><div class="card-head"><div class="filters" id="bgmFilters"></div></div>
        <div id="bgmList">${UI.loadingState()}</div><div id="bgmTotals"></div></div>`;
@@ -17453,6 +17494,9 @@ async function pageBgmRegister(root) {
   const nb = document.getElementById('bgmNew');
   nb.classList.toggle('hidden', !meta.access.canEdit);
   nb.onclick = () => bgmInstrumentForm(null, id => navigate('bgm-instrument', id));
+  const ib = document.getElementById('bgmImport');
+  ib.classList.toggle('hidden', !meta.access.canEdit);
+  ib.onclick = () => bgmImportDialog(() => load());
   let last = null;
   const cols = [
     { key: 'InstrumentID', label: 'Record', render: r => bgmLink(r.InstrumentID) },
@@ -17488,6 +17532,116 @@ async function pageBgmRegister(root) {
   document.getElementById('bgmPrint').onclick = () => last && bgmPrintList('Instrument register', last.rows, last.totals);
   bgmFilterBar(document.getElementById('bgmFilters'), meta, load);
   await load();
+}
+
+/*
+ * Import from the Excel template (owner, 27 Nov 2026). The workbook is read here
+ * with SheetJS (loaded only when this dialog opens); every row goes to the
+ * server, which checks it by the screen's own rules. Check first: nothing is
+ * saved until the file has no problem and the user confirms.
+ */
+const BGM_XLSX_URL = 'https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js';
+function bgmLoadXlsx() {
+  if (window.XLSX) return Promise.resolve(window.XLSX);
+  if (!bgmLoadXlsx.p) {
+    bgmLoadXlsx.p = new Promise((resolve, reject) => {
+      const s = document.createElement('script');
+      s.src = BGM_XLSX_URL;
+      s.onload = () => window.XLSX ? resolve(window.XLSX) : reject(new Error('The Excel reader did not load.'));
+      s.onerror = () => { bgmLoadXlsx.p = null; reject(new Error('Could not load the Excel reader. Check the internet connection and try again.')); };
+      document.head.appendChild(s);
+    });
+  }
+  return bgmLoadXlsx.p;
+}
+
+/** Each sheet's rows as {heading: text as Excel shows it}, with the sheet row number. */
+async function bgmReadWorkbook(file) {
+  const XLSX = await bgmLoadXlsx();
+  const wb = XLSX.read(await file.arrayBuffer(), { type: 'array', cellDates: false });
+  const rows = name => {
+    const ws = wb.Sheets[name];
+    if (!ws) return null;
+    const list = XLSX.utils.sheet_to_json(ws, { raw: false, defval: '', blankrows: true });
+    return list.map((r, i) => Object.assign({ __row: i + 2 }, r));
+  };
+  const instruments = rows('Instruments'), payments = rows('Payments');
+  if (!instruments && !payments) throw new Error('This is not the Security Instruments template: it has no "Instruments" or "Payments" sheet.');
+  return { fileName: file.name, instruments: instruments || [], payments: payments || [] };
+}
+
+function bgmImportDialog(onDone) {
+  const plural = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
+  const body = UI.el('div');
+  body.innerHTML = `
+    <p class="muted" style="margin-top:0">Fill the <strong>Security Instruments import template</strong> (sheets
+      <em>Instruments</em> and <em>Payments</em>) and choose it here. It is checked first by the same rules as the
+      Register screen; nothing is saved until the check passes and you confirm.</p>
+    <p style="margin:0 0 12px"><a class="link" href="templates/Security-Instruments-Import-Template.xlsx" download>Download the blank template</a></p>
+    <div class="field"><label for="bgmImpFile">Excel file (.xlsx)</label>
+      <input class="input" type="file" id="bgmImpFile" accept=".xlsx"></div>
+    <div id="bgmImpResult" style="margin-top:12px"></div>`;
+  let payload = null;
+  let m = null;
+  const out = () => body.querySelector('#bgmImpResult');
+  const importBtn = () => m.footer.querySelector('.btn-primary');
+  const note = (cls, text) => `<div style="margin-bottom:8px;padding:10px 12px;border-radius:6px;${cls === 'bad'
+    ? 'background:#fdecea;color:#8a1c1c' : 'background:#e8f5e9;color:#1b5e20'}">${text}</div>`;
+  const showResult = d => {
+    const s = d.summary || {};
+    let html = `<div class="muted" style="margin-bottom:8px">Rows read: ${plural(s.instrumentRows || 0, 'instrument')}, ${plural(s.paymentRows || 0, 'payment')}.</div>`;
+    if (d.problems && d.problems.length) {
+      out().innerHTML = html + note('bad', `${plural(d.problems.length, 'problem')} found. Nothing has been imported. ` +
+        'Correct these rows in Excel, save, and choose the file again.');
+      const host = UI.el('div');
+      out().appendChild(host);
+      UI.table(host, { columns: [{ key: 'sheet', label: 'Sheet', width: '110px' }, { key: 'row', label: 'Row', width: '60px', align: 'right' },
+        { key: 'message', label: 'Problem' }], rows: d.problems });
+      importBtn().classList.add('hidden');
+      return;
+    }
+    const totals = (s.totals || []).map(t => `<strong>${UI.esc(t.Currency)}</strong>: ${plural(t.Instruments, 'instrument')}, ` +
+      `face value ${UI.fmt.money(t.FaceValue)} · ${plural(t.Payments, 'payment')}, ${UI.fmt.money(t.PaymentAmount)}`).join('<br>');
+    out().innerHTML = html + note('good', `No problems. Ready to import ${plural(s.instrumentsReady, 'instrument')} and ` +
+      `${plural(s.paymentsReady, 'payment')}.`) + `<div style="margin-bottom:8px">${totals}</div>`;
+    if ((s.preview || []).length) {
+      const host = UI.el('div');
+      out().appendChild(host);
+      UI.table(host, { columns: [{ key: 'Row', label: 'Row', align: 'right', width: '50px' }, { key: 'Type', label: 'Type' },
+        { key: 'Number', label: 'Number' }, { key: 'Issuer', label: 'Bank / insurer' }, { key: 'Beneficiary', label: 'Beneficiary' },
+        { key: 'FaceValue', label: 'Face value', align: 'right', render: r => bgmMoney(r.FaceValue, r.Currency) },
+        { key: 'ExpiryDate', label: 'Expiry', render: r => bgmDate(r.ExpiryDate) },
+        { key: 'Payments', label: 'Payments', align: 'right' }], rows: s.preview });
+    }
+    importBtn().classList.remove('hidden');
+    importBtn().textContent = `Import ${plural(s.instrumentsReady, 'instrument')} and ${plural(s.paymentsReady, 'payment')}`;
+  };
+  m = UI.modal({ title: 'Import security instruments', body, size: 'lg', footer: [
+    { label: 'Close', onClick: x => x.close() },
+    { label: 'Import', class: 'btn-primary hidden', onClick: async x => {
+        if (!payload) return;
+        x.busy(true);
+        try {
+          const r = await api('bgmImport', payload, true);
+          if (!r.data.committed) { x.busy(false); showResult(r.data); return; }
+          UI.success('Imported', r.message);
+          x.close();
+          if (onDone) onDone();
+        } catch (e) { x.busy(false); UI.error('Could not import', e.message); }
+      } }
+  ] });
+  body.querySelector('#bgmImpFile').onchange = async e => {
+    const file = e.target.files[0];
+    payload = null;
+    importBtn().classList.add('hidden');
+    if (!file) { out().innerHTML = ''; return; }
+    out().innerHTML = UI.loadingState();
+    try {
+      payload = await bgmReadWorkbook(file);
+      const r = await api('bgmImport', payload, false);
+      showResult(r.data);
+    } catch (err) { payload = null; out().innerHTML = UI.errorState(err.message); }
+  };
 }
 
 const BGM_EXPORT_COLS = [
