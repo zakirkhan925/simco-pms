@@ -11943,7 +11943,7 @@ const expState = { page: 1, pageSize: 25, search: '', status: '', category: '', 
                    mineOnly: false, awaitingMe: false, sortBy: 'ExpenseDate', sortDir: 'desc' };
 // Rows a page is remembered in this browser (owner, 27 Nov 2026).
 const subState = { page: 1, pageSize: (() => { try { return Number(localStorage.getItem('pms_sub_pagesize')) || 25; } catch (e) { return 25; } })(),
-  search: '', trade: '', category: '', group: '', status: '' };
+  search: '', trade: '', category: '', group: '', status: '', sortBy: 'CompanyName', sortDir: 'asc' };
 const agrState = { page: 1, pageSize: 25, search: '', status: '', projectId: '', liveOnly: false };
 
 const SUB_TONE = { Active: 'green', Inactive: 'grey', Blacklisted: 'red', Unknown: 'amber' };
@@ -12414,6 +12414,12 @@ async function loadSubcontractors() {
 
   UI.table(mount, {
     rowKey: 'SubcontractorID',
+    // Click a heading to sort by it, again to reverse (owner, 27 Nov 2026); the server sorts the whole list.
+    sortBy: subState.sortBy, sortDir: subState.sortDir,
+    onSort: key => {
+      subState.sortDir = (subState.sortBy === key && subState.sortDir === 'asc') ? 'desc' : 'asc';
+      subState.sortBy = key; subState.page = 1; loadSubcontractors();
+    },
     columns: [
       { key: 'SubcontractorID', label: 'ID', width: '95px',
         render: r => `<a href="#" class="link" data-sub="${r.SubcontractorID}">${r.SubcontractorID}</a>` },
