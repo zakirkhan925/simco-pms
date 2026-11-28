@@ -9889,14 +9889,21 @@ async function openTransferForm(rooms) {
   try { items = (await api('listStock', { pageSize: 1000, inStockOnly: true })).data.rows; }
   catch (e) { UI.error('Could not load stock', e.message); return; }
   if (items.length === 0) { UI.warn('Nothing to transfer', 'No store holds any stock.'); return; }
-  if (rooms.length < 2) { UI.warn('Only one store', 'A transfer needs somewhere to go.'); return; }
+  // Any active store may be sent to (owner, 28 Nov 2026); an older server sends no list: the user's own.
+  let targets = rooms;
+  try {
+    const t = (await api('listStockRooms', { activeOnly: true })).data.transferTargets;
+    if (Array.isArray(t) && t.length) targets = t;
+  } catch (e) { /* keep the user's own stores */ }
+  const label = r => r.Name + (r.ProjectName && r.ProjectName !== r.Name ? ' (' + r.ProjectName + ')' : '');
+  if (targets.length < 2) { UI.warn('Only one store', 'A transfer needs somewhere to go.'); return; }
 
   const fields = [
     { name: 'FromStockRoomID', label: 'From store', type: 'select', required: true,
       // Only stores this user may send from; any store may be sent to (store access, 28 Nov 2026).
       options: workableRooms(rooms).map(r => ({ value: r.StockRoomID, label: r.Name })) },
     { name: 'ToStockRoomID', label: 'To store', type: 'select', required: true,
-      options: rooms.map(r => ({ value: r.StockRoomID, label: r.Name })) }
+      options: targets.map(r => ({ value: r.StockRoomID, label: label(r) })) }
   ];
   const body = UI.el('div');
   const form = UI.form(fields);
@@ -9905,10 +9912,11 @@ async function openTransferForm(rooms) {
   body.appendChild(linesHost);
   const fromSel = form.querySelector('[name="FromStockRoomID"]');
   const toSel = form.querySelector('[name="ToStockRoomID"]');
-  if (rooms.length > 1) toSel.value = rooms[1].StockRoomID;
+  const pickTo = () => { if (toSel.value === fromSel.value) { const o = targets.find(r => r.StockRoomID !== fromSel.value); if (o) toSel.value = o.StockRoomID; } };
+  pickTo();
   const ed = stockLineEditor(linesHost, { label: 'Quantity to move',
     itemsFor: id => items.filter(i => i.StockRoomID === id) });
-  fromSel.onchange = () => ed.setRoom(fromSel.value);
+  fromSel.onchange = () => { ed.setRoom(fromSel.value); pickTo(); };
   ed.setRoom(fromSel.value);
 
   UI.modal({
