@@ -11089,11 +11089,13 @@ async function loadTransfers() {
   const mount = document.getElementById('transferList');
   if (!mount) return;
   try {
-    const d = (await api('listStockTransfers', Object.assign({}, transferState))).data;
+    const d = (await api('listStockTransfers', Object.assign({ grouped: true }, transferState))).data;
     const s = d.summary;
     document.getElementById('transferSummary').innerHTML =
-      `<div class="stat"><div class="stat-label">Transfer lines</div>
-         <div class="stat-value" id="transferCount">${s.total}</div></div>
+      (d.grouped ? `<div class="stat"><div class="stat-label">Transfers</div>
+         <div class="stat-value" id="transferCount">${s.documents}</div><div class="stat-note">${s.total} line(s)</div></div>`
+      : `<div class="stat"><div class="stat-label">Transfer lines</div>
+         <div class="stat-value" id="transferCount">${s.total}</div></div>`) + `
        <div class="stat"><div class="stat-label">Value moved</div>
          <div class="stat-value">${money(s.value)}</div></div>
        <div class="stat"><div class="stat-label">In transit</div>
@@ -11102,7 +11104,9 @@ async function loadTransfers() {
          <div class="stat-value">${(s.toReceive || 0) + (s.shortPending || 0)}</div>
          <div class="stat-note">${s.toReceive || 0} to receive · ${s.shortPending || 0} shortfall(s) to decide</div></div>`;
 
-    // One set of buttons per transfer, on its first line shown (28 Nov 2026).
+    if (d.grouped) { renderTransferDocs(mount, d); return; }
+
+    // (Older server: one row per line.) One set of buttons per transfer, on its first line shown (28 Nov 2026).
     const seen = new Set();
     d.rows.forEach(t => { const k = t.TransferNumber || t.TransferID; t._first = !seen.has(k); seen.add(k); });
     const TONE = { 'In Transit': 'amber', Received: 'green', Returned: 'grey', Completed: 'green' };
@@ -11160,6 +11164,90 @@ async function loadTransfers() {
     const b = document.getElementById('retryTransfers');
     if (b) b.onclick = () => loadTransfers();
   }
+}
+
+const TRANSFER_TONE = { 'In Transit': 'amber', Received: 'green', Returned: 'grey', Completed: 'green' };
+
+/** One row per transfer (owner, 28 Nov 2026: "1 document line and when click on it details show"). */
+function renderTransferDocs(mount, d) {
+  const short = t => t.ShortStatus ? `<div style="font-size:11.5px" class="${t.ShortStatus === 'Pending Approval' ? 'num-neg' : 'muted'}">shortfall: ${UI.esc(t.ShortStatus.toLowerCase())}</div>` : '';
+  UI.table(mount, {
+    rowKey: 'TransferNumber',
+    columns: [
+      { key: 'TransferNumber', label: 'Transfer', width: '120px',
+        render: t => `<a href="#" class="link mono" data-tropen="${UI.esc(t.TransferNumber)}">${UI.esc(t.TransferNumber)}</a>` },
+      { key: 'TransferDate', label: 'When', width: '110px', render: t => UI.fmt.date(t.TransferDate) },
+      { key: 'FromStockRoomName', label: 'From → To',
+        render: t => `${UI.esc(t.FromStockRoomName)}<div class="muted" style="font-size:11.5px">→ ${UI.esc(t.ToStockRoomName)}</div>` },
+      { key: 'LineCount', label: 'Items', align: 'right', width: '80px',
+        render: t => `${t.LineCount}` + (t.ShortLines ? `<div class="num-neg" style="font-size:11.5px">${t.ShortLines} short</div>` : '') },
+      { key: 'Value', label: 'Value', align: 'right', width: '120px', render: t => money(t.Value) },
+      { key: 'Status', label: 'Status', width: '170px', render: t => UI.badge(t.Status, TRANSFER_TONE[t.Status] || 'grey') + short(t) },
+      { key: 'CreatedByName', label: 'Sent / received by', width: '170px',
+        render: t => UI.esc(t.CreatedByName || '') +
+          (t.ReceivedByName ? `<div class="muted" style="font-size:11.5px">${t.Status === 'Returned' ? 'returned' : 'received'} by ${UI.esc(t.ReceivedByName)}</div>` : '') },
+      { key: 'x', label: '', align: 'right', render: t => `<div class="row-actions">` +
+          (t.CanReceive ? `<button class="btn btn-sm btn-primary" data-trrecv="${UI.esc(t.TransferNumber)}">Receive</button>` : '') +
+          (t.CanDecideShort ? ` <button class="btn btn-sm btn-primary" data-trshort="${UI.esc(t.TransferNumber)}">Decide shortfall</button>` : '') +
+          ` <button class="btn btn-sm" data-trview="${UI.esc(t.TransferNumber)}">View</button></div>` }
+    ],
+    rows: d.rows,
+    empty: UI.emptyState('No transfers', d.canTransfer
+      ? 'Stock moved between stores appears here. Start one from the Stock page.'
+      : 'Stock moved between stores appears here.')
+  });
+  const docOf = no => d.rows.find(t => t.TransferNumber === no);
+  // The whole row opens the transfer; its own buttons do their own thing.
+  mount.querySelectorAll('tbody tr[data-key]').forEach(tr => {
+    tr.style.cursor = 'pointer';
+    tr.addEventListener('click', e => {
+      if (e.target.closest('button')) return;
+      e.preventDefault();
+      openTransferDetail(docOf(tr.dataset.key));
+    });
+  });
+  mount.querySelectorAll('[data-trrecv]').forEach(b => { b.onclick = () => openReceiveTransfer(b.dataset.trrecv); });
+  mount.querySelectorAll('[data-trshort]').forEach(b => { b.onclick = () => openShortfallDecision(b.dataset.trshort, docOf(b.dataset.trshort).Lines); });
+  mount.querySelectorAll('[data-trview]').forEach(b => { b.onclick = () => openTransferDetail(docOf(b.dataset.trview)); });
+  UI.pager(document.getElementById('transferPager'), {
+    page: d.page, totalPages: d.totalPages, total: d.total, pageSize: d.pageSize,
+    onPage: p => { transferState.page = p; loadTransfers(); }
+  });
+}
+
+/** A transfer's details: who, where, every line, and what can be done with it now. */
+function openTransferDetail(t) {
+  if (!t) return;
+  const n = v => UI.fmt.number(v, 3);
+  const got = l => l.ReceivedQty !== null && l.ReceivedQty !== undefined && l.Status === 'Received';
+  const body = UI.el('div');
+  body.innerHTML = `
+    <div class="grid-2" style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px">
+      <div><div class="muted" style="font-size:12px">From</div><strong>${UI.esc(t.FromStockRoomName)}</strong>
+        <div class="muted" style="font-size:12px">Sent by ${UI.esc(t.CreatedByName || '')} on ${UI.esc(UI.fmt.date(t.TransferDate))}</div></div>
+      <div><div class="muted" style="font-size:12px">To</div><strong>${UI.esc(t.ToStockRoomName)}</strong>
+        <div class="muted" style="font-size:12px">${t.ReceivedByName ? (t.Status === 'Returned' ? 'Returned' : 'Received') + ' by ' + UI.esc(t.ReceivedByName) : 'Not received yet'}</div></div>
+    </div>
+    <div style="margin-bottom:8px">${UI.badge(t.Status, TRANSFER_TONE[t.Status] || 'grey')}
+      ${t.ShortStatus ? `<span class="${t.ShortStatus === 'Pending Approval' ? 'num-neg' : 'muted'}" style="margin-left:8px">shortfall: ${UI.esc(t.ShortStatus.toLowerCase())}</span>` : ''}</div>
+    <div class="table-wrap"><table class="data"><thead><tr><th style="width:40px">#</th><th>Item</th>
+      <th class="num">Sent</th><th class="num">Received</th><th class="num">Value</th></tr></thead><tbody>
+      ${t.Lines.map((l, i) => `<tr><td>${i + 1}</td>
+        <td><strong>${UI.esc(l.ItemCode)}</strong><div class="muted" style="font-size:11.5px">${UI.esc(l.ItemName || '')}</div></td>
+        <td class="num">${n(l.Quantity)} ${UI.esc(l.Unit || '')}</td>
+        <td class="num">${got(l) ? n(l.ReceivedQty) + (l.ShortQty > 0 ? `<div class="num-neg" style="font-size:11.5px">short ${n(l.ShortQty)}</div>` : '') : '<span class="muted">—</span>'}</td>
+        <td class="num">${money(l.Value)}</td></tr>`).join('')}
+      </tbody><tfoot><tr><th colspan="4">${t.LineCount} item${t.LineCount === 1 ? '' : 's'}</th><th class="num">${money(t.Value)}</th></tr></tfoot></table></div>
+    ${t.ReceiveRemarks ? `<p class="muted" style="margin-top:10px">Receiving remarks: ${UI.esc(t.ReceiveRemarks)}</p>` : ''}`;
+  const footer = [{ label: 'Close', onClick: m => m.close() },
+    { label: 'Gate pass', onClick: () => printTransferGatePass(t.TransferNumber) }];
+  if (t.CanReturn) footer.push({ label: 'Return', onClick: m => { m.close(); openReasonModal({
+    title: 'Return ' + t.TransferNumber, label: 'Why is it going back? Everything on it returns to the sending store.',
+    confirmLabel: 'Return to sender', danger: true,
+    onConfirm: async reason => { UI.success('Returned', (await api('returnStockTransfer', t.TransferNumber, reason)).message); loadTransfers(); } }); } });
+  if (t.CanDecideShort) footer.push({ label: 'Decide shortfall', class: 'btn-primary', onClick: m => { m.close(); openShortfallDecision(t.TransferNumber, t.Lines); } });
+  if (t.CanReceive) footer.push({ label: 'Receive', class: 'btn-primary', onClick: m => { m.close(); openReceiveTransfer(t.TransferNumber); } });
+  UI.modal({ title: 'Transfer ' + t.TransferNumber, size: 'wide', body, footer });
 }
 
 /**
