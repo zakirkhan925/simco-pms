@@ -9437,6 +9437,8 @@ async function loadStock() {
        ['Below minimum', d.summary.belowMinimum, 'Needs replenishing'],
        ['Out of stock', d.summary.zeroStock, 'Nothing on the shelf']]
         .concat(d.summary.imsLines ? [['From IMS', d.summary.imsLines, money(d.summary.imsValue) + ' brought over from IMS']] : [])
+        // Sent but not yet received (28 Nov 2026): in neither store.
+        .concat(d.summary.inTransitLines ? [['In transit', money(d.summary.inTransitValue), d.summary.inTransitLines + ' line(s) sent, not yet received']] : [])
         .map(t => `<div class="stat"><div class="stat-label">${UI.esc(t[0])}</div>
           <div class="stat-value">${UI.esc(t[1])}</div><div class="stat-note">${UI.esc(t[2])}</div>
           <div class="stat-accent"></div></div>`).join('');
@@ -10906,7 +10908,7 @@ async function openIssueForm() {
 
 /* ------------------------------------------------------------- TRANSFERS */
 
-const transferState = { page: 1, pageSize: 25, search: '', stockRoomId: '' };
+const transferState = { page: 1, pageSize: 25, search: '', stockRoomId: '', status: '' };
 
 async function pageTransfers(root) {
   root.innerHTML = pageHead('Transfers', 'Material moved between stores', '') +
@@ -10919,6 +10921,11 @@ async function pageTransfers(root) {
                     value="${UI.esc(transferState.search)}"></div>
            <div class="field"><label for="transferRoom">Store</label>
              <select class="input" id="transferRoom"><option value="">All stores</option></select></div>
+           <div class="field"><label for="transferStatus">Status</label>
+             <select class="input" id="transferStatus">${[['', 'All'], ['To receive', 'Waiting for me to receive'],
+               ['In Transit', 'In transit'], ['Short', 'Shortfall to decide'], ['Received', 'Received'], ['Returned', 'Returned'],
+               ['Completed', 'Completed (before 28 Nov)']].map(o =>
+               `<option value="${o[0]}"${transferState.status === o[0] ? ' selected' : ''}>${o[1]}</option>`).join('')}</select></div>
            <button class="btn" id="transferReset">Reset</button>
          </div>
        </div>
@@ -10936,8 +10943,11 @@ async function pageTransfers(root) {
   document.getElementById('transferRoom').onchange = e => {
     transferState.stockRoomId = e.target.value; transferState.page = 1; loadTransfers();
   };
+  document.getElementById('transferStatus').onchange = e => {
+    transferState.status = e.target.value; transferState.page = 1; loadTransfers();
+  };
   document.getElementById('transferReset').onclick = () => {
-    Object.assign(transferState, { page: 1, search: '', stockRoomId: '' });
+    Object.assign(transferState, { page: 1, search: '', stockRoomId: '', status: '' });
     pageTransfers(root);
   };
 
@@ -10960,27 +10970,50 @@ async function loadTransfers() {
   if (!mount) return;
   try {
     const d = (await api('listStockTransfers', Object.assign({}, transferState))).data;
-
+    const s = d.summary;
     document.getElementById('transferSummary').innerHTML =
-      `<div class="stat"><div class="stat-label">Transfers</div>
-         <div class="stat-value" id="transferCount">${d.summary.total}</div></div>
+      `<div class="stat"><div class="stat-label">Transfer lines</div>
+         <div class="stat-value" id="transferCount">${s.total}</div></div>
        <div class="stat"><div class="stat-label">Value moved</div>
-         <div class="stat-value">${money(d.summary.value)}</div></div>`;
+         <div class="stat-value">${money(s.value)}</div></div>
+       <div class="stat"><div class="stat-label">In transit</div>
+         <div class="stat-value">${money(s.inTransitValue || 0)}</div><div class="stat-note">${s.inTransit || 0} line(s) sent, not yet received</div></div>
+       <div class="stat"><div class="stat-label">Waiting for you</div>
+         <div class="stat-value">${(s.toReceive || 0) + (s.shortPending || 0)}</div>
+         <div class="stat-note">${s.toReceive || 0} to receive · ${s.shortPending || 0} shortfall(s) to decide</div></div>`;
 
+    // One set of buttons per transfer, on its first line shown (28 Nov 2026).
+    const seen = new Set();
+    d.rows.forEach(t => { t._first = !seen.has(t.TransferNumber); seen.add(t.TransferNumber); });
+    const TONE = { 'In Transit': 'amber', Received: 'green', Returned: 'grey', Completed: 'green' };
     UI.table(mount, {
       columns: [
         { key: 'TransferNumber', label: 'Transfer', width: '120px',
-          render: t => `<span class="mono">${UI.esc(t.TransferNumber || t.TransferID)}</span>` },
-        { key: 'TransferDate', label: 'When', width: '120px', render: t => UI.fmt.date(t.TransferDate) },
+          render: t => `<span class="mono">${UI.esc(t.TransferNumber || t.TransferID)}</span>` +
+            (t.TransferID !== t.TransferNumber ? `<div class="muted" style="font-size:11.5px">line ${UI.esc(String(t.TransferID).split('-').pop())}</div>` : '') },
+        { key: 'TransferDate', label: 'When', width: '110px', render: t => UI.fmt.date(t.TransferDate) },
         { key: 'ItemCode', label: 'Item',
           render: t => `<strong>${UI.esc(t.ItemCode)}</strong>` +
             (t.ItemName ? `<div class="muted" style="font-size:11.5px">${UI.esc(t.ItemName)}</div>` : '') },
-        { key: 'FromStockRoomName', label: 'From', width: '150px' },
-        { key: 'ToStockRoomName', label: 'To', width: '150px' },
-        { key: 'Quantity', label: 'Quantity', align: 'right', width: '110px',
-          render: t => UI.fmt.number(t.Quantity, 3) + (t.Unit ? ' ' + UI.esc(t.Unit) : '') },
-        { key: 'Value', label: 'Value', align: 'right', width: '120px', render: t => money(t.Value) },
-        { key: 'CreatedByName', label: 'By', width: '140px' }
+        { key: 'FromStockRoomName', label: 'From → To',
+          render: t => `${UI.esc(t.FromStockRoomName)}<div class="muted" style="font-size:11.5px">→ ${UI.esc(t.ToStockRoomName)}</div>` },
+        { key: 'Quantity', label: 'Sent / received', align: 'right', width: '140px',
+          render: t => UI.fmt.number(t.Quantity, 3) + (t.Unit ? ' ' + UI.esc(t.Unit) : '') +
+            (t.ReceivedQty !== null && t.ReceivedQty !== undefined && t.Status === 'Received'
+              ? `<div class="${t.ShortQty > 0 ? 'num-neg' : 'muted'}" style="font-size:11.5px">received ${UI.fmt.number(t.ReceivedQty, 3)}` +
+                (t.ShortQty > 0 ? ` · short ${UI.fmt.number(t.ShortQty, 3)}` : '') + `</div>` : '') },
+        { key: 'Value', label: 'Value', align: 'right', width: '110px', render: t => money(t.Value) },
+        { key: 'Status', label: 'Status', width: '170px',
+          render: t => UI.badge(t.Status, TONE[t.Status] || 'grey') +
+            (t.ShortStatus ? `<div style="font-size:11.5px" class="${t.ShortStatus === 'Pending Approval' ? 'num-neg' : 'muted'}">shortfall: ${UI.esc(t.ShortStatus.toLowerCase())}</div>` : '') },
+        { key: 'CreatedByName', label: 'Sent / received by', width: '160px',
+          render: t => UI.esc(t.CreatedByName || '') +
+            (t.ReceivedByName ? `<div class="muted" style="font-size:11.5px">${t.Status === 'Returned' ? 'returned' : 'received'} by ${UI.esc(t.ReceivedByName)}</div>` : '') },
+        { key: 'x', label: '', align: 'right', render: t => !t._first ? '' : `<div class="row-actions">` +
+            (t.CanReceive ? `<button class="btn btn-sm btn-primary" data-trrecv="${UI.esc(t.TransferNumber)}">Receive</button>` : '') +
+            (t.CanReturn ? ` <button class="btn btn-sm" data-trback="${UI.esc(t.TransferNumber)}">Return</button>` : '') +
+            (t.CanDecideShort ? ` <button class="btn btn-sm btn-primary" data-trshort="${UI.esc(t.TransferNumber)}">Decide shortfall</button>` : '') +
+            `</div>` }
       ],
       rows: d.rows,
       empty: UI.emptyState('No transfers',
@@ -10988,6 +11021,13 @@ async function loadTransfers() {
           ? 'Stock moved between stores appears here. Start one from the Stock page.'
           : 'Stock moved between stores appears here.')
     });
+    const linesOf = no => d.rows.filter(t => t.TransferNumber === no);
+    mount.querySelectorAll('[data-trrecv]').forEach(b => { b.onclick = () => openReceiveTransfer(b.dataset.trrecv); });
+    mount.querySelectorAll('[data-trback]').forEach(b => { b.onclick = () => openReasonModal({
+      title: 'Return ' + b.dataset.trback, label: 'Why is it going back? Everything on it returns to the sending store.',
+      confirmLabel: 'Return to sender', danger: true,
+      onConfirm: async reason => { UI.success('Returned', (await api('returnStockTransfer', b.dataset.trback, reason)).message); loadTransfers(); } }); });
+    mount.querySelectorAll('[data-trshort]').forEach(b => { b.onclick = () => openShortfallDecision(b.dataset.trshort, linesOf(b.dataset.trshort)); });
 
     UI.pager(document.getElementById('transferPager'), {
       page: d.page, totalPages: d.totalPages, total: d.total, pageSize: d.pageSize,
@@ -10998,6 +11038,73 @@ async function loadTransfers() {
     const b = document.getElementById('retryTransfers');
     if (b) b.onclick = () => loadTransfers();
   }
+}
+
+/** The receiving store confirms what arrived, line by line (28 Nov 2026). */
+async function openReceiveTransfer(no) {
+  let lines;
+  try { lines = (await api('listStockTransfers', { search: no, pageSize: 500 })).data.rows.filter(t => t.TransferNumber === no); }
+  catch (e) { UI.error('Could not load the transfer', e.message); return; }
+  if (!lines.length) { UI.warn('Transfer not found'); return; }
+  const body = UI.el('div');
+  body.innerHTML = `<p class="muted" style="margin-top:0">From <strong>${UI.esc(lines[0].FromStockRoomName)}</strong> to
+      <strong>${UI.esc(lines[0].ToStockRoomName)}</strong>, sent by ${UI.esc(lines[0].CreatedByName)} on ${UI.esc(UI.fmt.date(lines[0].TransferDate))}.
+      Enter what actually arrived. Anything short goes to Management to approve as a loss, or to send back.</p>
+    <div class="table-wrap"><table class="table"><thead><tr><th>Item</th><th class="num">Sent</th><th class="num" style="width:150px">Received</th></tr></thead>
+    <tbody>${lines.map((t, i) => `<tr><td><strong>${UI.esc(t.ItemCode)}</strong> ${UI.esc(t.ItemName || '')}</td>
+      <td class="num">${UI.fmt.number(t.Quantity, 3)} ${UI.esc(t.Unit || '')}</td>
+      <td class="num"><input class="input" type="number" step="any" min="0" max="${t.Quantity}" data-recv="${i}" value="${t.Quantity}" style="text-align:right"></td></tr>`).join('')}
+    </tbody></table></div>
+    <div class="field" style="margin-top:12px"><label for="recvRemarks">Remarks</label>
+      <textarea class="input" id="recvRemarks" placeholder="e.g. 5 bricks broken on the way"></textarea></div>
+    <div id="recvNote" class="mt-16"></div>`;
+  const note = body.querySelector('#recvNote');
+  const read = () => lines.map((t, i) => ({ t, got: Number(body.querySelector(`[data-recv="${i}"]`).value) }));
+  const refresh = () => {
+    const short = read().filter(x => !isNaN(x.got) && x.got < x.t.Quantity);
+    note.innerHTML = short.length ? `<div class="banner banner-warn"><div>${short.length} line(s) short:
+      ${short.map(x => `${UI.esc(x.t.ItemCode)} ${UI.fmt.number(x.t.Quantity - x.got, 3)} ${UI.esc(x.t.Unit || '')}`).join(', ')}.
+      This goes to Management.</div></div>` : `<div class="banner banner-info"><div>Everything arrived.</div></div>`;
+  };
+  body.querySelectorAll('[data-recv]').forEach(el => el.addEventListener('input', refresh));
+  refresh();
+  UI.modal({ title: 'Receive ' + no, size: 'wide', body, footer: [
+    { label: 'Cancel', onClick: m => m.close() },
+    { label: 'Confirm receipt', class: 'btn-primary', onClick: async m => {
+      const got = read();
+      const bad = got.find(x => isNaN(x.got) || x.got < 0 || x.got > x.t.Quantity + 1e-9);
+      if (bad) { UI.warn('Check the quantities', `${bad.t.ItemCode}: between 0 and ${bad.t.Quantity}.`); return; }
+      m.busy(true);
+      try {
+        const res = await api('receiveStockTransfer', no, { Remarks: body.querySelector('#recvRemarks').value,
+          Lines: got.map(x => ({ TransferID: x.t.TransferID, ReceivedQty: x.got })) });
+        m.close(); UI.success('Received', res.message); loadTransfers();
+      } catch (e) { m.busy(false); UI.error('Not received', e.message); }
+    } }
+  ] });
+}
+
+/** Management: what did not arrive is a loss in transit, or goes back to the sending store. */
+function openShortfallDecision(no, lines) {
+  const short = lines.filter(t => t.ShortStatus === 'Pending Approval');
+  const body = UI.el('div');
+  body.innerHTML = `<p class="muted" style="margin-top:0">${UI.esc(lines[0].FromStockRoomName)} → ${UI.esc(lines[0].ToStockRoomName)},
+      received by ${UI.esc(lines[0].ReceivedByName || '')}${lines[0].ReceiveRemarks ? ': ' + UI.esc(lines[0].ReceiveRemarks) : ''}.</p>
+    <ul>${short.map(t => `<li><strong>${UI.esc(t.ItemCode)}</strong>: ${UI.fmt.number(t.ShortQty, 3)} ${UI.esc(t.Unit || '')} did not arrive
+      (value ${money(t.ShortQty * (t.Value / t.Quantity || 0))})</li>`).join('')}</ul>
+    <div class="field"><label for="shortRemarks">Reason *</label><textarea class="input" id="shortRemarks"></textarea></div>`;
+  const decide = act => async m => {
+    const r = body.querySelector('#shortRemarks').value.trim();
+    if (!r) { UI.warn('Give the reason'); return; }
+    m.busy(true);
+    try { const res = await api('decideTransferShortage', no, act, r); m.close(); UI.success('Decided', res.message); loadTransfers(); }
+    catch (e) { m.busy(false); UI.error('Not decided', e.message); }
+  };
+  UI.modal({ title: 'Shortfall on ' + no, body, footer: [
+    { label: 'Cancel', onClick: m => m.close() },
+    { label: 'Send back to sending store', onClick: decide('RETURN') },
+    { label: 'Approve as loss in transit', class: 'btn-primary', onClick: decide('LOSS') }
+  ] });
 }
 
 /* -------------------------------------------------------- REGISTRATION */
