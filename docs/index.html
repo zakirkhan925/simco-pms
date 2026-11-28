@@ -9755,7 +9755,8 @@ function stockLineEditor(host, opts) {
       const options = `<option value="">Choose an item…</option>` + rows.map(r =>
         `<option value="${UI.esc(r.ItemID)}"${r.ItemID === l.ItemID ? ' selected' : ''}>${UI.esc(r.ItemCode)} — ${UI.esc(r.ItemName)}</option>`).join('');
       return `<tr>
-        <td><select class="input" data-item="${i}">${options}</select></td>
+        <td>${l.ItemID ? '' : `<input class="input" type="search" data-find="${i}" placeholder="Search code or name…" autocomplete="off" style="margin-bottom:4px">`}
+          <select class="input" data-item="${i}">${options}</select></td>
         <td class="num">${it ? UI.fmt.number(it.Closing, 3) + ' ' + UI.esc(it.Unit) : '—'}</td>
         <td class="num"><input class="input" type="number" step="any" min="0" data-qty="${i}" value="${l.Quantity === '' ? '' : UI.esc(l.Quantity)}" style="text-align:right"></td>
         ${opts.withReason ? `<td><select class="input" data-reason="${i}"><option value="">(sheet's)</option>${opts.reasons.map(x =>
@@ -9764,12 +9765,36 @@ function stockLineEditor(host, opts) {
     }).join('') || `<tr><td colspan="${opts.withReason ? 5 : 4}" class="muted">No items yet. Add one, or every item in the store.</td></tr>`;
     host.querySelector('[data-count]').textContent = lines.length ? `${lines.length} line${lines.length === 1 ? '' : 's'}` : '';
     tbody.querySelectorAll('[data-item]').forEach(s => s.onchange = () => { lines[+s.dataset.item].ItemID = s.value; draw(); });
+    // Search box on an empty line (owner, 28 Nov 2026): narrows the item list as you type, by code or name;
+    // Enter takes the first match. Only the list is filtered: nothing is chosen until picked.
+    tbody.querySelectorAll('[data-find]').forEach(f => {
+      const sel = tbody.querySelector(`[data-item="${f.dataset.find}"]`);
+      const matches = () => {
+        const words = f.value.toLowerCase().split(/\s+/).filter(Boolean);
+        const hits = rows.filter(r => { const t = `${r.ItemCode} ${r.ItemName}`.toLowerCase(); return words.every(w => t.includes(w)); });
+        return hits;
+      };
+      f.oninput = () => {
+        const hits = matches();
+        sel.innerHTML = `<option value="">${!f.value.trim() ? 'Choose an item…' : hits.length ? `${hits.length} match${hits.length === 1 ? '' : 'es'} — choose…` : 'No item matches'}</option>` +
+          hits.map(r => `<option value="${UI.esc(r.ItemID)}">${UI.esc(r.ItemCode)} — ${UI.esc(r.ItemName)}</option>`).join('');
+      };
+      f.onkeydown = e => {
+        if (e.key !== 'Enter') return;
+        e.preventDefault();
+        const hit = matches()[0];
+        if (hit) { lines[+f.dataset.find].ItemID = hit.ItemID; draw(); }
+      };
+    });
     tbody.querySelectorAll('[data-qty]').forEach(s => s.oninput = () => { lines[+s.dataset.qty].Quantity = s.value; if (opts.onChange) opts.onChange(); });
     tbody.querySelectorAll('[data-reason]').forEach(s => s.onchange = () => { lines[+s.dataset.reason].ReasonCode = s.value; });
     tbody.querySelectorAll('[data-del]').forEach(b => b.onclick = () => { lines.splice(+b.dataset.del, 1); draw(); });
     if (opts.onChange) opts.onChange();
   };
-  host.querySelector('[data-add]').onclick = () => { lines.push({ ItemID: '', Quantity: '', ReasonCode: '' }); draw(); };
+  host.querySelector('[data-add]').onclick = () => {
+    lines.push({ ItemID: '', Quantity: '', ReasonCode: '' }); draw();
+    const f = tbody.querySelector(`[data-find="${lines.length - 1}"]`); if (f) f.focus();
+  };
   host.querySelector('[data-all]').onclick = () => {
     for (let k = lines.length - 1; k >= 0; k--) if (!lines[k].ItemID && lines[k].Quantity === '') lines.splice(k, 1);
     const have = new Set(lines.map(l => l.ItemID));
