@@ -9296,8 +9296,8 @@ const qty = (v, u) => UI.fmt.number(v, 3) + (u ? ' ' + UI.esc(u) : '');
 async function pageStock(root, arg) {
   stockState.projectId = (arg && arg.projectId) ? arg.projectId : '';
   if (arg && arg.projectId) stockState.page = 1;
-  let rooms = [];
-  try { rooms = (await api('listStockRooms', { activeOnly: true })).data.rows; }
+  let rooms = [], canSetAccess = false;
+  try { const rd = (await api('listStockRooms', { activeOnly: true })).data; rooms = rd.rows; canSetAccess = !!rd.canSetAccess; }
   catch (e) { /* the list below will report it */ }
 
   root.innerHTML =
@@ -9307,6 +9307,7 @@ async function pageStock(root, arg) {
       (can('stock.adjust') ? `<button class="btn" id="openingBtn">Opening stock</button>
         <button class="btn" id="sheetBtn">Count / write-off sheet</button>` : '') +
       (can('stock.transfer') ? `<button class="btn" id="transferBtn">Transfer</button>` : '') +
+      (canSetAccess ? `<button class="btn" id="accessBtn">Store access</button>` : '') +
       // Count corrections and write-offs waiting for approval (owner, 21 Nov 2026).
       `<button class="btn" id="adjListBtn">Adjustments &amp; write-offs</button>`) +
     `<div id="stockSummary" class="stat-grid" style="margin-bottom:16px"></div>
@@ -9365,12 +9366,15 @@ async function pageStock(root, arg) {
         { key: 'ItemCount', label: 'Items in stock', align: 'right' },
         { key: 'StockValue', label: 'Stock value', align: 'right', render: r => money(r.StockValue) },
         { key: 'share', label: 'Share', align: 'right', render: r => total ? (100 * (Number(r.StockValue) || 0) / total).toFixed(1) + '%' : '—' }
-      ],
+      ].concat(rooms.some(r => 'AccessUsers' in r) ? [{ key: 'AccessNames', label: 'Who works in it',
+        render: r => r._total ? '' : (r.AccessNames && r.AccessNames.length
+          ? UI.esc(r.AccessNames.join(', ')) : '<span class="muted">All stock staff</span>') }] : []),
       rows: sorted.concat([{ StockRoomID: '', Name: '', ProjectName: '', ItemCount: items, StockValue: total, _total: true }])
     });
     const last = byStore.querySelector('tbody tr:last-child');
     if (last) last.innerHTML = `<td><strong>All stores</strong></td><td></td>
-      <td class="num"><strong>${UI.fmt.number(items, 0)}</strong></td><td class="num"><strong>${money(total)}</strong></td><td class="num">100%</td>`;
+      <td class="num"><strong>${UI.fmt.number(items, 0)}</strong></td><td class="num"><strong>${money(total)}</strong></td><td class="num">100%</td>` +
+      (rooms.some(r => 'AccessUsers' in r) ? '<td></td>' : '');
     byStore.querySelectorAll('[data-room]').forEach(a => {
       a.onclick = e => {
         e.preventDefault();
@@ -9408,6 +9412,7 @@ async function pageStock(root, arg) {
   const bind = (id, fn) => { const b = document.getElementById(id); if (b) b.onclick = fn; };
   bind('newItemBtn', () => openItemForm(null));
   bind('newRoomBtn', () => openStockRoomForm());
+  bind('accessBtn', () => openStoreAccess(rooms));
   bind('openingBtn', () => openOpeningStockForm(rooms));
   bind('transferBtn', () => openTransferForm(rooms));
   bind('sheetBtn', () => openAdjustmentSheet(rooms, stockState.stockRoomId));
@@ -9598,6 +9603,76 @@ async function openItemForm(existing, onSaved) {
   });
 }
 
+/** Stores this user may work in (store access list, 28 Nov 2026). An older server sends no flag: all. */
+const workableRooms = rs => (rs || []).filter(r => r.CanWork !== false);
+
+/**
+ * Store access (owner, 28 Nov 2026: NUST Store for Arif and Nadeem, "a way that i can give access of
+ * NUST store to others if needed"). Administrator only. Ticked people alone work in the store; none
+ * ticked = open to all stock staff, as before. Seeing its stock is not affected.
+ */
+async function openStoreAccess(rooms, roomId) {
+  let users = [];
+  try { users = (await api('listUsers', { status: 'Active' })).data.rows || []; }
+  catch (e) { UI.error('Could not load users', e.message); return; }
+  users = users.filter(u => u.Status === 'Active').sort((a, b) => String(a.Name).localeCompare(String(b.Name)));
+  const stockFirst = u => /STOCK|STORE/i.test(u.Role) ? 0 : 1;
+  users.sort((a, b) => stockFirst(a) - stockFirst(b));
+  const body = UI.el('div');
+  body.innerHTML = `<div class="field"><label for="accRoom">Store</label>
+      <select class="input" id="accRoom">${rooms.map(r => `<option value="${UI.esc(r.StockRoomID)}">${UI.esc(r.Name)}
+        ${r.ProjectName ? ' (' + UI.esc(r.ProjectName) + ')' : ''}</option>`).join('')}</select></div>
+    <p class="muted" style="margin:8px 0">Only the people ticked can issue from this store, send transfers out of it, receive
+      into it and raise counts or write-offs on it. Administrators always can; Management's approvals are not affected;
+      everyone with stock access can still see its stock. <strong>Tick nobody</strong> to open it to all stock staff again.</p>
+    <div class="field"><input class="input" type="search" id="accFind" placeholder="Search people…" autocomplete="off"></div>
+    <div id="accList" style="max-height:340px;overflow:auto;border:1px solid var(--border, #DDE2E9);border-radius:6px;padding:6px 10px"></div>
+    <div class="muted mt-16" id="accCount"></div>`;
+  const sel = body.querySelector('#accRoom');
+  if (roomId) sel.value = roomId;
+  const ticked = new Set();
+  const load = () => {
+    ticked.clear();
+    const r = rooms.find(x => x.StockRoomID === sel.value);
+    ((r && r.AccessUsers) || []).forEach(id => ticked.add(id));
+    draw();
+  };
+  const draw = () => {
+    const q = body.querySelector('#accFind').value.toLowerCase().trim();
+    body.querySelector('#accList').innerHTML = users
+      .filter(u => !q || `${u.Name} ${u.Email} ${u.Role}`.toLowerCase().includes(q) || ticked.has(u.UserID))
+      .map(u => `<label class="checkbox" style="display:flex;gap:8px;padding:4px 0">
+        <input type="checkbox" data-uid="${UI.esc(u.UserID)}"${ticked.has(u.UserID) ? ' checked' : ''}>
+        <span><strong>${UI.esc(u.Name)}</strong> <span class="muted">· ${UI.esc(u.Role)}</span></span></label>`).join('')
+      || '<div class="muted">Nobody matches.</div>';
+    body.querySelectorAll('[data-uid]').forEach(c => c.onchange = () => {
+      if (c.checked) ticked.add(c.dataset.uid); else ticked.delete(c.dataset.uid); count();
+    });
+    count();
+  };
+  const count = () => {
+    body.querySelector('#accCount').textContent = ticked.size
+      ? `${ticked.size} person${ticked.size === 1 ? '' : 's'} will work in this store.`
+      : 'Nobody ticked: open to all stock staff.';
+  };
+  sel.onchange = load;
+  body.querySelector('#accFind').oninput = draw;
+  load();
+  UI.modal({ title: 'Store access', body, footer: [
+    { label: 'Cancel', onClick: m => m.close() },
+    { label: 'Save', class: 'btn-primary', onClick: async m => {
+      m.busy(true);
+      try {
+        const res = await api('updateStockRoom', sel.value, { AccessUsers: [...ticked] });
+        const after = res.data || {};
+        if (!('AccessUsers' in after)) { m.busy(false); UI.warn('Not saved', 'The server is older than this page: deploy it first.'); return; }
+        m.close(); UI.success('Store access saved', res.message);
+        navigate('stock');
+      } catch (e) { m.busy(false); UI.error('Not saved', e.message); }
+    } }
+  ] });
+}
+
 async function openStockRoomForm() {
   let projects = [];
   try {
@@ -9637,6 +9712,7 @@ async function openStockRoomForm() {
 }
 
 async function openOpeningStockForm(rooms) {
+  rooms = workableRooms(rooms);
   let items = [];
   try { items = (await api('listStockItems', { pageSize: 500, activeOnly: true })).data.rows; }
   catch (e) { UI.error('Could not load the item master', e.message); return; }
@@ -9817,7 +9893,8 @@ async function openTransferForm(rooms) {
 
   const fields = [
     { name: 'FromStockRoomID', label: 'From store', type: 'select', required: true,
-      options: rooms.map(r => ({ value: r.StockRoomID, label: r.Name })) },
+      // Only stores this user may send from; any store may be sent to (store access, 28 Nov 2026).
+      options: workableRooms(rooms).map(r => ({ value: r.StockRoomID, label: r.Name })) },
     { name: 'ToStockRoomID', label: 'To store', type: 'select', required: true,
       options: rooms.map(r => ({ value: r.StockRoomID, label: r.Name })) }
   ];
@@ -9874,6 +9951,9 @@ async function openTransferForm(rooms) {
 
 /** A count correction or write-off of many items in one store, sent for approval as one sheet. */
 async function openAdjustmentSheet(rooms, roomId) {
+  rooms = workableRooms(rooms);
+  if (!rooms.length) { UI.warn('No store', 'You do not work in any store.'); return; }
+  if (roomId && !rooms.some(r => r.StockRoomID === roomId)) roomId = '';
   let items = [];
   try { items = (await api('listStock', { pageSize: 1000 })).data.rows; }
   catch (e) { UI.error('Could not load stock', e.message); return; }
@@ -10814,7 +10894,7 @@ async function openIssueForm() {
   try {
     projects = (await api('listProjects', { pageSize: 200, includeMetrics: false })).data.rows
       .filter(p => !p.IsClosed);
-    rooms = (await api('listStockRooms', { activeOnly: true })).data.rows;
+    rooms = workableRooms((await api('listStockRooms', { activeOnly: true })).data.rows);
     stock = (await api('listStock', { pageSize: 500, inStockOnly: true })).data.rows;
   } catch (e) { UI.error('Could not load', e.message); return; }
   if (!projects.length) { UI.warn('No open projects'); return; }
