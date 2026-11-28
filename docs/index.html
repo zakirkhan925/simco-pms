@@ -9288,7 +9288,7 @@ const issueState = { page: 1, pageSize: 25, search: '', stockRoomId: '', project
 
 const TXN_TONE = { OPENING: 'grey', RECEIPT: 'green', RETURN: 'green', TRANSFER_IN: 'blue',
                    ISSUE: 'amber', TRANSFER_OUT: 'amber', ADJUSTMENT: 'violet',
-                   RECEIPT_REVERSAL: 'red', VENDOR_RETURN: 'red', VENDOR_RETURN_CANCEL: 'grey' };
+                   RECEIPT_REVERSAL: 'red', VENDOR_RETURN: 'red', VENDOR_RETURN_CANCEL: 'grey', TRANSFER_IN_REVERSAL: 'red' };
 const qty = (v, u) => UI.fmt.number(v, 3) + (u ? ' ' + UI.esc(u) : '');
 
 /* ================================================================== STOCK */
@@ -11245,6 +11245,14 @@ function openTransferDetail(t) {
     title: 'Return ' + t.TransferNumber, label: 'Why is it going back? Everything on it returns to the sending store.',
     confirmLabel: 'Return to sender', danger: true,
     onConfirm: async reason => { UI.success('Returned', (await api('returnStockTransfer', t.TransferNumber, reason)).message); loadTransfers(); } }); } });
+  // Administrator only (owner, 28 Nov 2026): the receipt is undone and the transfer received again.
+  if (t.CanReopen) footer.push({ label: 'Reopen receipt', onClick: m => { m.close(); openReasonModal({
+    title: 'Reopen ' + t.TransferNumber,
+    intro: `What ${UI.esc(t.ToStockRoomName)} received comes back out of its stock` +
+      (t.ShortStatus === 'Returned to sender' ? `, and the shortfall sent back to ${UI.esc(t.FromStockRoomName)} comes out of it again` : '') +
+      `. The transfer goes back to In Transit, to be received again with the right quantities.`,
+    label: 'Why is it reopened?', confirmLabel: 'Reopen receipt', danger: true,
+    onConfirm: async reason => { UI.success('Reopened', (await api('reopenTransferReceipt', t.TransferNumber, reason)).message); loadTransfers(); } }); } });
   if (t.CanDecideShort) footer.push({ label: 'Decide shortfall', class: 'btn-primary', onClick: m => { m.close(); openShortfallDecision(t.TransferNumber, t.Lines); } });
   if (t.CanReceive) footer.push({ label: 'Receive', class: 'btn-primary', onClick: m => { m.close(); openReceiveTransfer(t.TransferNumber); } });
   UI.modal({ title: 'Transfer ' + t.TransferNumber, size: 'wide', body, footer });
