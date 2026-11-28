@@ -9856,8 +9856,15 @@ async function openTransferForm(rooms) {
         try {
           const res = await api('createStockTransfer', { FromStockRoomID: data.FromStockRoomID, ToStockRoomID: data.ToStockRoomID,
             Lines: lines.map(l => ({ ItemID: l.ItemID, Quantity: Number(l.Quantity) })) });
-          m.close(); UI.success('Transferred', res.message);
+          m.close();
           navigate('stock');
+          const no = res.data && res.data.TransferNumber;
+          if (no) {
+            // The goods leave with a gate pass (owner, 28 Nov 2026): offered straight away; also on the Transfers page.
+            UI.modal({ title: 'Sent: ' + no, body: UI.el('p', { style: 'margin:0' }, UI.esc(res.message) + ' Print the gate pass to go with the goods?'),
+              footer: [{ label: 'Done', onClick: x => x.close() },
+                       { label: 'Print gate pass', class: 'btn-primary', onClick: x => { x.close(); printTransferGatePass(no); } }] });
+          } else UI.success('Transferred', res.message);
         } catch (e) { UI.error('Could not transfer', e.message); }
         finally { m.busy(false); }
       }}
@@ -11009,7 +11016,7 @@ async function loadTransfers() {
 
     // One set of buttons per transfer, on its first line shown (28 Nov 2026).
     const seen = new Set();
-    d.rows.forEach(t => { t._first = !seen.has(t.TransferNumber); seen.add(t.TransferNumber); });
+    d.rows.forEach(t => { const k = t.TransferNumber || t.TransferID; t._first = !seen.has(k); seen.add(k); });
     const TONE = { 'In Transit': 'amber', Received: 'green', Returned: 'grey', Completed: 'green' };
     UI.table(mount, {
       columns: [
@@ -11038,6 +11045,7 @@ async function loadTransfers() {
             (t.CanReceive ? `<button class="btn btn-sm btn-primary" data-trrecv="${UI.esc(t.TransferNumber)}">Receive</button>` : '') +
             (t.CanReturn ? ` <button class="btn btn-sm" data-trback="${UI.esc(t.TransferNumber)}">Return</button>` : '') +
             (t.CanDecideShort ? ` <button class="btn btn-sm btn-primary" data-trshort="${UI.esc(t.TransferNumber)}">Decide shortfall</button>` : '') +
+            ` <button class="btn btn-sm" data-trgate="${UI.esc(t.TransferNumber || t.TransferID)}" title="Print the gate pass">Gate pass</button>` +
             `</div>` }
       ],
       rows: d.rows,
@@ -11052,6 +11060,7 @@ async function loadTransfers() {
       title: 'Return ' + b.dataset.trback, label: 'Why is it going back? Everything on it returns to the sending store.',
       confirmLabel: 'Return to sender', danger: true,
       onConfirm: async reason => { UI.success('Returned', (await api('returnStockTransfer', b.dataset.trback, reason)).message); loadTransfers(); } }); });
+    mount.querySelectorAll('[data-trgate]').forEach(b => { b.onclick = () => printTransferGatePass(b.dataset.trgate); });
     mount.querySelectorAll('[data-trshort]').forEach(b => { b.onclick = () => openShortfallDecision(b.dataset.trshort, linesOf(b.dataset.trshort)); });
 
     UI.pager(document.getElementById('transferPager'), {
@@ -11063,6 +11072,47 @@ async function loadTransfers() {
     const b = document.getElementById('retryTransfers');
     if (b) b.onclick = () => loadTransfers();
   }
+}
+
+/**
+ * Gate pass for a transfer (owner, 28 Nov 2026): the paper that leaves the store with the goods.
+ * Items and quantities only, no rates or values. Vehicle, driver and time out are written by hand;
+ * "Qty received" is filled in once the receiving store has confirmed in PMS, blank before.
+ */
+async function printTransferGatePass(no) {
+  let lines;
+  try { lines = (await api('listStockTransfers', { search: no, pageSize: 500 })).data.rows.filter(t => (t.TransferNumber || t.TransferID) === no); }
+  catch (e) { UI.error('Could not load the transfer', e.message); return; }
+  if (!lines.length) { UI.warn('Transfer not found', no); return; }
+  lines.sort((a, b) => String(a.TransferID).localeCompare(String(b.TransferID), undefined, { numeric: true }));
+  const t = lines[0];
+  const q = v => UI.fmt.number(v, 3);
+  const got = x => x.Status === 'Received' && x.ReceivedQty !== null && x.ReceivedQty !== undefined;
+  const hand = label => `<div class="hand"><span>${UI.esc(label)}</span><i></i></div>`;
+  const body = `
+    <div class="grid">
+      <div class="box"><h3>FROM (SENDING STORE)</h3><strong>${UI.esc(t.FromStockRoomName || t.FromStockRoomID)}</strong>
+        <div class="muted">Sent by ${UI.esc(t.CreatedByName || '')} on ${UI.esc(UI.fmt.date(t.TransferDate))}</div></div>
+      <div class="box"><h3>TO (RECEIVING STORE)</h3><strong>${UI.esc(t.ToStockRoomName || t.ToStockRoomID)}</strong>
+        <div class="muted">${t.ReceivedByName ? `${t.Status === 'Returned' ? 'Returned' : 'Received'} by ${UI.esc(t.ReceivedByName)}` : 'Status: ' + UI.esc(t.Status || '')}</div></div>
+    </div>
+    <table><thead><tr><th style="width:34px">#</th><th style="width:110px">Item code</th><th>Description</th>
+      <th style="width:60px">Unit</th><th class="r" style="width:95px">Qty sent</th><th class="r" style="width:105px">Qty received</th></tr></thead>
+    <tbody>${lines.map((x, i) => `<tr><td>${i + 1}</td><td>${UI.esc(x.ItemCode || '')}</td><td>${UI.esc(x.ItemName || '')}</td>
+      <td>${UI.esc(x.Unit || '')}</td><td class="r">${q(x.Quantity)}</td><td class="r">${got(x) ? q(x.ReceivedQty) : ''}</td></tr>`).join('')}</tbody>
+    <tfoot><tr><td colspan="4">${lines.length} item${lines.length === 1 ? '' : 's'}</td><td></td><td></td></tr></tfoot></table>
+    ${t.ReceiveRemarks ? `<p class="muted" style="margin-top:8px">Receiving remarks: ${UI.esc(t.ReceiveRemarks)}</p>` : ''}
+    <div class="hands">${hand('Vehicle no.')}${hand('Driver name')}${hand('Driver CNIC / phone')}${hand('Time out')}</div>`;
+  UI.print.send(UI.print.page({
+    title: 'Gate Pass', ref: no,
+    meta: ['Stock transfer', 'Date ' + UI.fmt.date(t.TransferDate)],
+    body,
+    styles: UI.print.docStyles() + `
+      .hands{display:grid;grid-template-columns:1fr 1fr;gap:14px 28px;margin-top:22px}
+      .hand{display:flex;align-items:flex-end;gap:8px;font-size:11.5px}
+      .hand span{color:#5A6472;white-space:nowrap}.hand i{flex:1;border-bottom:1px solid #10151C;height:16px}`,
+    signatures: ['Issued by (store in-charge)', 'Driver', 'Security / gate', 'Received by (store in-charge)']
+  }));
 }
 
 /** The receiving store confirms what arrived, line by line (28 Nov 2026). */
