@@ -3832,7 +3832,7 @@ async function pageProfile(root) {
          </div>
        </div>
      </div>`;
-  if (window.innerWidth < 900) document.getElementById('profGrid').style.gridTemplateColumns = '1fr';
+  if (window.innerWidth < 900) document.getElementById('profGrid').style.gridTemplateColumns = 'minmax(0, 1fr)';
 
   const form = UI.form(fields, u);
   document.getElementById('profForm').appendChild(form);
@@ -6918,7 +6918,7 @@ async function pageVendorProfile(root, vendorId) {
        </div>
      </div>`;
 
-  if (window.innerWidth < 1100) document.getElementById('vendGrid').style.gridTemplateColumns = '1fr';
+  if (window.innerWidth < 1100) document.getElementById('vendGrid').style.gridTemplateColumns = 'minmax(0, 1fr)';
   document.getElementById('backVendors').onclick = () => navigate('vendors');
   const ed = document.getElementById('editVendor');
   if (ed) ed.onclick = () => openVendorForm(v, () => navigate('vendor', vendorId));
@@ -7481,7 +7481,7 @@ async function pagePurchaseRequestDetail(root, prId) {
          <div id="prHistory"></div></div>
      </div>`;
 
-  if (window.innerWidth < 1100) document.getElementById('prLower').style.gridTemplateColumns = '1fr';
+  if (window.innerWidth < 1100) document.getElementById('prLower').style.gridTemplateColumns = 'minmax(0, 1fr)';
   document.getElementById('backPrs').onclick = () => navigate('purchase-requests');
   document.getElementById('printPr').onclick = () => printRecord('PR', r.PRID);
 
@@ -9817,7 +9817,8 @@ function stockLineEditor(host, opts) {
   // opts: { itemsFor(roomId) -> rows, label (qty heading), withReason, reasons, onChange }
   let roomId = '';
   const lines = [];
-  host.innerHTML = `<div class="table-wrap"><table class="table"><thead><tr>
+  // "data lines": on a phone each line becomes a card, the item search across its width (28 Nov 2026).
+  host.innerHTML = `<div class="table-wrap"><table class="data lines"><thead><tr>
       <th>Item</th><th class="num" style="width:120px">In store</th>
       <th class="num" style="width:140px">${UI.esc(opts.label)}</th>
       ${opts.withReason ? '<th style="width:170px">Reason (if not the sheet\'s)</th>' : ''}
@@ -9835,7 +9836,7 @@ function stockLineEditor(host, opts) {
       const options = `<option value="">Choose an item…</option>` + rows.map(r =>
         `<option value="${UI.esc(r.ItemID)}"${r.ItemID === l.ItemID ? ' selected' : ''}>${UI.esc(r.ItemCode)} — ${UI.esc(r.ItemName)}</option>`).join('');
       return `<tr>
-        <td>${l.ItemID ? '' : `<input class="input" type="search" data-find="${i}" placeholder="Search code or name…" autocomplete="off" style="margin-bottom:4px">`}
+        <td class="wide">${l.ItemID ? '' : `<input class="input" type="search" data-find="${i}" placeholder="Search code or name…" autocomplete="off" style="margin-bottom:4px">`}
           <select class="input" data-item="${i}">${options}</select></td>
         <td class="num">${it ? UI.fmt.number(it.Closing, 3) + ' ' + UI.esc(it.Unit) : '—'}</td>
         <td class="num"><input class="input" type="number" step="any" min="0" data-qty="${i}" value="${l.Quantity === '' ? '' : UI.esc(l.Quantity)}" style="text-align:right"></td>
@@ -18702,7 +18703,7 @@ async function pageBgmReports(root, id) {
   if (id) bgmRep.id = id;
   root.innerHTML = pageHead('Recovery Reports', 'Sixteen views of the same records the dashboard uses',
     `<button class="btn" id="bgmRepCsv">Export to Excel</button> <button class="btn" id="bgmRepPrint">Print / PDF</button>`) +
-    `<div class="report-layout" style="display:grid;grid-template-columns:270px minmax(0,1fr);gap:16px;align-items:start">
+    `<div class="report-layout">
        <div class="card" id="bgmRepList" style="padding:6px 0"></div>
        <div style="min-width:0">
          <div class="card"><div class="card-head"><div class="filters" id="bgmFilters"></div></div>
