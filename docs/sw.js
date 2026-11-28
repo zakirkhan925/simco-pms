@@ -12,8 +12,10 @@ button{margin-top:18px;font:inherit;padding:10px 22px;border:0;border-radius:6px
 </head><body><div><div style="font-size:18px;font-weight:700">No connection</div>
 <p style="opacity:.85">SIMCO PMS needs the internet. Check your connection and try again.</p>
 <button onclick="location.reload()">Try again</button></div></body></html>`;
+// The page itself is fetched past the phone's HTTP cache (28 Nov 2026): GitHub Pages lets it be kept
+// for 10 minutes, so a reopened app could show the old screens after a release.
 self.addEventListener('fetch', e => {
   if (e.request.mode !== 'navigate') return;          // everything else: straight to the network
-  e.respondWith(fetch(e.request).catch(() =>
+  e.respondWith(fetch(e.request.url, { cache: 'no-store', credentials: 'same-origin' }).catch(() =>
     new Response(OFFLINE, { headers: { 'Content-Type': 'text/html; charset=utf-8' } })));
 });
