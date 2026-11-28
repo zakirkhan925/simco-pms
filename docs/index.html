@@ -13553,8 +13553,12 @@ async function loadSubLedger(subId) {
         − advance not yet recovered ${cash(s.advanceUnrecovered)}.
         Bills are entered after retention; retention held (${cash(s.retentionHeld)}) is not in the balance
         and comes in when it is released.</div>`;
+    // Debit and credit totals at the foot (owner, 28 Nov 2026).
+    const sumOf = k => d.entries.reduce((t, e) => t + (Number(e[k]) || 0), 0);
     const rows = [{ opening: true, description: 'Balance brought forward', balance: d.openingBalance }]
-      .concat(d.entries);
+      .concat(d.entries)
+      .concat(d.entries.length ? [{ opening: true, total: true, description: 'Total', debit: sumOf('debit'), credit: sumOf('credit'),
+        balance: s.closingBalance }] : []);
     UI.table(host, {
       columns: [
         { key: 'date', label: 'Date', width: '96px', render: r => r.opening ? '' : UI.fmt.date(r.date) },
@@ -13564,13 +13568,13 @@ async function loadSubLedger(subId) {
           r.opening ? '' : `<span class="mono nowrap">${UI.esc(r.ref)}</span>` +
             (r.document ? `<br><span class="muted">${UI.esc(r.document)}</span>` : '') },
         { key: 'description', label: 'Particulars', render: r =>
-          (r.opening ? `<em>${UI.esc(r.description)}</em>` : UI.esc(r.description)) +
+          (r.total ? `<strong>${UI.esc(r.description)}</strong>` : r.opening ? `<em>${UI.esc(r.description)}</em>` : UI.esc(r.description)) +
           (r.project || r.agreementId ? `<br><span class="muted">${UI.esc([r.agreementId, r.project]
             .filter(Boolean).join(' · '))}</span>` : '') },
         { key: 'debit', label: 'Debit', align: 'right', width: '108px', render: r =>
-          r.debit ? UI.fmt.number(r.debit) : '<span class="muted">—</span>' },
+          r.total ? `<strong>${UI.fmt.number(r.debit)}</strong>` : r.debit ? UI.fmt.number(r.debit) : '<span class="muted">—</span>' },
         { key: 'credit', label: 'Credit', align: 'right', width: '108px', render: r =>
-          r.credit ? UI.fmt.number(r.credit) : '<span class="muted">—</span>' },
+          r.total ? `<strong>${UI.fmt.number(r.credit)}</strong>` : r.credit ? UI.fmt.number(r.credit) : '<span class="muted">—</span>' },
         { key: 'balance', label: 'Balance', align: 'right', width: '116px', render: r =>
           `<strong>${UI.fmt.number(r.balance)}</strong>` },
         { key: 'actions', label: '', align: 'right', width: '80px', render: r =>
@@ -20147,6 +20151,9 @@ const PRINT_BODIES = {
   SUBSTMT(p) {
     const d = p.data, v = d.subcontractor, s = d.summary;
     const n = x => UI.fmt.number(x);
+    // Debit and credit totals of the lines shown (owner, 28 Nov 2026).
+    const totD = (d.entries || []).reduce((t, e) => t + (Number(e.debit) || 0), 0);
+    const totC = (d.entries || []).reduce((t, e) => t + (Number(e.credit) || 0), 0);
     const period = (d.from || d.to)
       ? `${d.from ? UI.fmt.date(d.from) : 'the beginning'} to ${d.to ? UI.fmt.date(d.to) : 'date'}`
       : 'All transactions to date';
@@ -20177,7 +20184,8 @@ const PRINT_BODIES = {
             <td class="r">${e.credit ? n(e.credit) : ''}</td>
             <td class="r">${n(e.balance)}</td></tr>`).join('')}
         </tbody>
-        <tfoot><tr class="total"><td colspan="5">Balance</td>
+        <tfoot><tr class="total"><td colspan="3">Total${d.from || d.to ? ' for the period' : ''} / Balance</td>
+          <td class="r">${n(totD)}</td><td class="r">${n(totC)}</td>
           <td class="r">${n(s.closingBalance)}</td></tr></tfoot>
       </table>
       <table style="margin-top:14px;width:auto">
