@@ -11273,7 +11273,16 @@ async function printTransferGatePass(no) {
   const q = v => UI.fmt.number(v, 3);
   const got = x => x.Status === 'Received' && x.ReceivedQty !== null && x.ReceivedQty !== undefined;
   const hand = label => `<div class="hand"><span>${UI.esc(label)}</span><i></i></div>`;
-  const body = `
+  // Where the transfer stands, said plainly (owner, 28 Nov 2026: a returned transfer showed nothing).
+  const returned = t.Status === 'Returned';
+  const stand = returned
+    ? `<div class="stand bad"><strong>RETURNED: nothing was received.</strong> Every item went back to
+        ${UI.esc(t.FromStockRoomName || t.FromStockRoomID)}${t.ReceivedAt ? ' on ' + UI.esc(UI.fmt.date(t.ReceivedAt)) : ''}${t.ReceivedByName ? ' by ' + UI.esc(t.ReceivedByName) : ''}.
+        ${t.ReceiveRemarks ? 'Reason: ' + UI.esc(t.ReceiveRemarks) : ''}</div>`
+    : t.Status === 'In Transit'
+      ? `<div class="stand">In transit: not yet received at ${UI.esc(t.ToStockRoomName || t.ToStockRoomID)}.</div>`
+      : '';
+  const body = stand + `
     <div class="grid">
       <div class="box"><h3>FROM (SENDING STORE)</h3><strong>${UI.esc(t.FromStockRoomName || t.FromStockRoomID)}</strong>
         <div class="muted">Sent by ${UI.esc(t.CreatedByName || '')} on ${UI.esc(UI.fmt.date(t.TransferDate))}</div></div>
@@ -11283,18 +11292,20 @@ async function printTransferGatePass(no) {
     <table><thead><tr><th style="width:34px">#</th><th style="width:110px">Item code</th><th>Description</th>
       <th style="width:60px">Unit</th><th class="r" style="width:95px">Qty sent</th><th class="r" style="width:105px">Qty received</th></tr></thead>
     <tbody>${lines.map((x, i) => `<tr><td>${i + 1}</td><td>${UI.esc(x.ItemCode || '')}</td><td>${UI.esc(x.ItemName || '')}</td>
-      <td>${UI.esc(x.Unit || '')}</td><td class="r">${q(x.Quantity)}</td><td class="r">${got(x) ? q(x.ReceivedQty) : ''}</td></tr>`).join('')}</tbody>
+      <td>${UI.esc(x.Unit || '')}</td><td class="r">${q(x.Quantity)}</td><td class="r">${returned ? 'returned' : got(x) ? q(x.ReceivedQty) : ''}</td></tr>`).join('')}</tbody>
     <tfoot><tr><td colspan="4">${lines.length} item${lines.length === 1 ? '' : 's'}</td><td></td><td></td></tr></tfoot></table>
-    ${t.ReceiveRemarks ? `<p class="muted" style="margin-top:8px">Receiving remarks: ${UI.esc(t.ReceiveRemarks)}</p>` : ''}
+    ${t.ReceiveRemarks && !returned ? `<p class="muted" style="margin-top:8px">Receiving remarks: ${UI.esc(t.ReceiveRemarks)}</p>` : ''}
     <div class="hands">${hand('Vehicle no.')}${hand('Driver name')}${hand('Driver CNIC / phone')}${hand('Time out')}</div>`;
   UI.print.send(UI.print.page({
-    title: 'Gate Pass', ref: no,
-    meta: ['Stock transfer', 'Date ' + UI.fmt.date(t.TransferDate)],
+    title: returned ? 'Gate Pass (Returned)' : 'Gate Pass', ref: no,
+    meta: ['Stock transfer', 'Date ' + UI.fmt.date(t.TransferDate), 'Status: ' + t.Status],
     body,
     styles: UI.print.docStyles() + `
       .hands{display:grid;grid-template-columns:1fr 1fr;gap:14px 28px;margin-top:22px}
       .hand{display:flex;align-items:flex-end;gap:8px;font-size:11.5px}
-      .hand span{color:#5A6472;white-space:nowrap}.hand i{flex:1;border-bottom:1px solid #10151C;height:16px}`,
+      .hand span{color:#5A6472;white-space:nowrap}.hand i{flex:1;border-bottom:1px solid #10151C;height:16px}
+      .stand{border:1px solid #DDE2E9;background:#F7F8FA;padding:8px 10px;margin-bottom:12px;font-size:12px}
+      .stand.bad{border:2px solid #B42318;background:#FEF3F2;color:#7A271A}`,
     signatures: ['Issued by (store in-charge)', 'Driver', 'Security / gate', 'Received by (store in-charge)']
   }));
 }
