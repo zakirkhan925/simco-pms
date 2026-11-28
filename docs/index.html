@@ -6091,7 +6091,11 @@ async function loadVendorLedger(vendorId) {
     const rows = [{ opening: true, date: '', type: '', ref: '', document: '',
                     description: 'Balance brought forward', project: '',
                     debit: 0, credit: 0, balance: d.openingBalance }]
-      .concat(d.entries);
+      .concat(d.entries)
+      // Debit and credit totals at the foot (owner, 28 Nov 2026).
+      .concat(d.entries.length ? [{ opening: true, total: true, date: '', type: '', ref: '', document: '', project: '',
+        description: 'Total', debit: d.entries.reduce((t, e) => t + (Number(e.debit) || 0), 0),
+        credit: d.entries.reduce((t, e) => t + (Number(e.credit) || 0), 0), balance: s.closingBalance }] : []);
     UI.table(host, {
       columns: [
         { key: 'date', label: 'Date', width: '96px', render: r =>
@@ -6106,14 +6110,14 @@ async function loadVendorLedger(vendorId) {
           `<span class="mono nowrap">${UI.esc(r.ref)}</span>` +
           (r.document ? `<br><span class="muted">${UI.esc(r.document)}</span>` : '') },
         { key: 'description', label: 'Particulars', render: r =>
-          r.opening ? `<em>${UI.esc(r.description)}</em>` : UI.esc(r.description) },
+          r.total ? `<strong>${UI.esc(r.description)}</strong>` : r.opening ? `<em>${UI.esc(r.description)}</em>` : UI.esc(r.description) },
         { key: 'project', label: 'Project', render: r =>
           r.opening ? '' : r.unassigned ? UI.badge('Not set', 'amber')
             : r.project ? UI.esc(r.project) : '<span class="muted">—</span>' },
         { key: 'debit', label: 'Debit', align: 'right', width: '108px', render: r =>
-          r.debit ? UI.fmt.number(r.debit) : '<span class="muted">—</span>' },
+          r.total ? `<strong>${UI.fmt.number(r.debit)}</strong>` : r.debit ? UI.fmt.number(r.debit) : '<span class="muted">—</span>' },
         { key: 'credit', label: 'Credit', align: 'right', width: '108px', render: r =>
-          r.credit ? UI.fmt.number(r.credit) : '<span class="muted">—</span>' },
+          r.total ? `<strong>${UI.fmt.number(r.credit)}</strong>` : r.credit ? UI.fmt.number(r.credit) : '<span class="muted">—</span>' },
         { key: 'balance', label: 'Balance', align: 'right', width: '116px', render: r =>
           `<strong>${UI.fmt.number(r.balance)}</strong>` },
         // Each line opens the document behind it: an invoice to correct or
@@ -20103,6 +20107,9 @@ const PRINT_BODIES = {
   VENDORSTMT(p) {
     const d = p.data, v = d.vendor, s = d.summary;
     const n = x => UI.fmt.number(x);
+    // Debit and credit totals are the lines shown, added up (owner, 28 Nov 2026).
+    const totD = (d.entries || []).reduce((t, e) => t + (Number(e.debit) || 0), 0);
+    const totC = (d.entries || []).reduce((t, e) => t + (Number(e.credit) || 0), 0);
     const period = (d.from || d.to)
       ? `${d.from ? UI.fmt.date(d.from) : 'the beginning'} to ${d.to ? UI.fmt.date(d.to) : 'date'}`
       : 'All transactions to date';
@@ -20131,8 +20138,8 @@ const PRINT_BODIES = {
             <td class="r">${e.credit ? n(e.credit) : ''}</td>
             <td class="r">${n(e.balance)}</td></tr>`).join('')}
         </tbody>
-        <tfoot><tr class="total"><td colspan="4">Balance payable${d.projectId ? ' — ' + UI.esc(d.projectName || d.projectId) : ''}</td>
-          <td class="r">${n(s.invoiced)}</td><td class="r">${n(s.paid + (s.taxWithheld || 0))}</td>
+        <tfoot><tr class="total"><td colspan="4">Total${d.from || d.to ? ' for the period' : ''} / Balance payable${d.projectId ? ' — ' + UI.esc(d.projectName || d.projectId) : ''}</td>
+          <td class="r">${n(totD)}</td><td class="r">${n(totC)}</td>
           <td class="r">${n(s.closingBalance)}</td></tr></tfoot>
       </table>
       ${s.receivedNotInvoiced > 0 ? `<p class="muted" style="margin-top:14px">
